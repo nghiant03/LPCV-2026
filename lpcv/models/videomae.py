@@ -16,6 +16,7 @@ from transformers import (
 
 if TYPE_CHECKING:
     from datasets import Dataset
+    from torch.utils.data import Dataset as TorchDataset
 
 DEFAULT_MODEL_NAME = "MCG-NJU/videomae-base"
 DEFAULT_NUM_FRAMES = 16
@@ -59,14 +60,14 @@ class VideoMAEModelTrainer:
     def __init__(
         self,
         config: VideoMAETrainerConfig,
-        train_dataset: Dataset,
-        eval_dataset: Dataset,
+        train_dataset: Dataset | TorchDataset,
+        eval_dataset: Dataset | TorchDataset,
     ):
         self.config = config
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
 
-        label_feature = train_dataset.features.get("label")
+        label_feature = train_dataset.features.get("label")  # type: ignore[union-attr]
         if label_feature is None:
             raise ValueError("Dataset must have a 'label' feature for label metadata")
         self.label_names: list[str] = label_feature.names

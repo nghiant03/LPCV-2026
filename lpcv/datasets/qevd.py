@@ -13,6 +13,7 @@ from tqdm.contrib.concurrent import process_map
 
 from lpcv.datasets.info import SPLIT_DIRS, TARGET_LABEL_FILE_NAME
 from lpcv.datasets.utils import (
+    check_video_dimensions,
     check_video_integrity,
     is_compatible_with_dataset,
 )
@@ -117,6 +118,11 @@ class QEVDAdapter:
 
         if not check_video_integrity(src_path):
             logger.warning(f"Quarantining corrupt video: {src_filename}")
+            shutil.move(src_path, quarantine_dir / src_filename)
+            return
+
+        if not check_video_dimensions(src_path):
+            logger.warning(f"Quarantining video with bad dimensions: {src_filename}")
             shutil.move(src_path, quarantine_dir / src_filename)
             return
 

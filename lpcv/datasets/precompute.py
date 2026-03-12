@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import shutil
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,9 @@ if TYPE_CHECKING:
 DEFAULT_SHORT_SIDE = 320
 DEFAULT_MAX_FRAMES = 64
 
+_CHECKPOINT_DIR_NAME = "_precompute_ckpt"
+_FAIL_SENTINEL = b""
+
 
 # ---------------------------------------------------------------------------
 # Module-level worker — must be a plain function to be picklable by mp.Pool
@@ -31,36 +35,52 @@ def _worker(
     args: tuple[int, dict],
     short_side: int,
     max_frames: int | None,
-) -> dict | None:
-    """Decode one video and return {"frames": ndarray, "label": int} or None."""
+    ckpt_dir: str,
+) -> int | None:
+    """Decode one video, save to checkpoint dir, return idx on success."""
     idx, row = args
+
+    ckpt_path = f"{ckpt_dir}/{idx}.npz"
 
     video_info = row.get("video")
     video_path = video_info.get("path") if isinstance(video_info, dict) else None
     if not video_path:
+        _mark_failed(ckpt_path)
         return None
 
     try:
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
         total = len(vr)
         if total == 0:
+            _mark_failed(ckpt_path)
             return None
 
         n = min(max_frames, total) if max_frames else total
         indices = np.linspace(0, total - 1, n).astype(int)
 
-        # get_batch stays in C++ — single GIL crossing for the whole batch
         frames = vr.get_batch(indices).asnumpy()  # (T, H, W, C) uint8
     except Exception:
         logger.warning(f"[{idx}] Failed to decode: {video_path}")
+        _mark_failed(ckpt_path)
         return None
 
     frames = _resize(frames, short_side)
     if frames is None:
         logger.warning(f"[{idx}] Skipped oversized video: {video_path}")
+        _mark_failed(ckpt_path)
         return None
 
-    return {"frames": frames, "label": int(row["label"])}
+    tmp_path = f"{ckpt_path}.tmp"
+    np.savez_compressed(tmp_path, frames=frames, label=np.array(int(row["label"])))
+    shutil.move(tmp_path, ckpt_path)
+    return idx
+
+
+def _mark_failed(ckpt_path: str) -> None:
+    """Write a zero-byte sentinel so we don't retry known-bad videos."""
+    from pathlib import Path as _P
+
+    _P(ckpt_path).write_bytes(_FAIL_SENTINEL)
 
 
 def _resize(frames: np.ndarray, short_side: int) -> np.ndarray | None:
@@ -106,37 +126,63 @@ class PrecomputedDataset:
 
     def precompute(self, output_dir: Path) -> DatasetDict:
         output_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_root = output_dir / _CHECKPOINT_DIR_NAME
         result_splits: dict[str, Dataset] = {}
 
         for split_name, split_ds in self.dataset.items():
             split_name = str(split_name)
             split_ds   = split_ds.cast_column("video", Video(decode=False))
 
+            ckpt_dir = ckpt_root / split_name
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+            all_args = list(enumerate(split_ds))
+            done_ids = {
+                int(p.stem)
+                for p in ckpt_dir.iterdir()
+                if p.suffix == ".npz"
+            }
+            pending = [a for a in all_args if a[0] not in done_ids]
+
             logger.info(
-                f"Precomputing {split_name}: {len(split_ds)} videos "
+                f"Precomputing {split_name}: {len(split_ds)} total, "
+                f"{len(done_ids)} already done, {len(pending)} pending "
                 f"(workers={self.num_workers}, short_side={self.short_side}, "
                 f"max_frames={self.max_frames})"
             )
 
-            fn = partial(_worker, short_side=self.short_side, max_frames=self.max_frames)
-            args = list(enumerate(split_ds))
+            if pending:
+                fn = partial(
+                    _worker,
+                    short_side=self.short_side,
+                    max_frames=self.max_frames,
+                    ckpt_dir=str(ckpt_dir),
+                )
+                with mp.Pool(self.num_workers) as pool:
+                    for _ in tqdm(
+                        pool.imap_unordered(fn, pending, chunksize=self.chunksize),
+                        total=len(pending),
+                        desc=split_name,
+                    ):
+                        pass
 
             records: list[dict] = []
-            with mp.Pool(self.num_workers) as pool:
-                for result in tqdm(
-                    pool.imap_unordered(fn, args, chunksize=self.chunksize),
-                    total=len(args),
-                    desc=split_name,
-                ):
-                    if result is not None:
-                        records.append(result)
+            for p in sorted(ckpt_dir.iterdir()):
+                if p.suffix != ".npz" or p.stat().st_size == 0:
+                    continue
+                data = np.load(p)
+                records.append({
+                    "frames": data["frames"],
+                    "label": int(data["label"]),
+                })
 
-            # Trainer shuffles anyway so ordering doesn't matter here
             result_splits[split_name] = Dataset.from_list(records)
-            logger.info(f"  {len(records)}/{len(args)} videos kept → {split_name}")
+            logger.info(f"  {len(records)}/{len(all_args)} videos kept → {split_name}")
 
         result = DatasetDict(result_splits)
         result.save_to_disk(str(output_dir), num_proc=self.num_workers)
+
+        shutil.rmtree(ckpt_root, ignore_errors=True)
         logger.info(f"Precomputed DatasetDict saved to {output_dir}")
 
         return result

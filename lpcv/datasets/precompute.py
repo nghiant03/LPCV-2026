@@ -31,6 +31,7 @@ _FAIL_SENTINEL = b""
 # Module-level worker — must be a plain function to be picklable by mp.Pool
 # ---------------------------------------------------------------------------
 
+
 def _worker(
     args: tuple[int, dict],
     short_side: int,
@@ -70,7 +71,7 @@ def _worker(
         _mark_failed(ckpt_path)
         return None
 
-    tmp_path = f"{ckpt_path}.tmp"
+    tmp_path = f"{ckpt_dir}/{idx}.tmp.npz"
     np.savez_compressed(tmp_path, frames=frames, label=np.array(int(row["label"])))
     shutil.move(tmp_path, ckpt_path)
     return idx
@@ -95,15 +96,15 @@ def _resize(frames: np.ndarray, short_side: int) -> np.ndarray | None:
     if t * 3 * new_h * new_w > 500_000_000:
         return None
 
-    return np.stack([
-        cv2.resize(frames[i], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        for i in range(t)
-    ])
+    return np.stack(
+        [cv2.resize(frames[i], (new_w, new_h), interpolation=cv2.INTER_LINEAR) for i in range(t)]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
+
 
 class PrecomputedDataset:
     def __init__(
@@ -114,11 +115,11 @@ class PrecomputedDataset:
         max_frames: int | None = DEFAULT_MAX_FRAMES,
         chunksize: int = 16,
     ):
-        self.dataset     = dataset
+        self.dataset = dataset
         self.num_workers = num_workers or mp.cpu_count()
-        self.short_side  = short_side
-        self.max_frames  = max_frames
-        self.chunksize   = chunksize
+        self.short_side = short_side
+        self.max_frames = max_frames
+        self.chunksize = chunksize
 
     # ------------------------------------------------------------------
     # Precompute
@@ -131,16 +132,14 @@ class PrecomputedDataset:
 
         for split_name, split_ds in self.dataset.items():
             split_name = str(split_name)
-            split_ds   = split_ds.cast_column("video", Video(decode=False))
+            split_ds = split_ds.cast_column("video", Video(decode=False))
 
             ckpt_dir = ckpt_root / split_name
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
             all_args = list(enumerate(split_ds))
             done_ids = {
-                int(p.stem)
-                for p in ckpt_dir.iterdir()
-                if p.suffix == ".npz"
+                int(p.stem) for p in ckpt_dir.iterdir() if p.suffix == ".npz" and p.stem.isdigit()
             }
             pending = [a for a in all_args if a[0] not in done_ids]
 
@@ -171,10 +170,12 @@ class PrecomputedDataset:
                 if p.suffix != ".npz" or p.stat().st_size == 0:
                     continue
                 data = np.load(p)
-                records.append({
-                    "frames": data["frames"],
-                    "label": int(data["label"]),
-                })
+                records.append(
+                    {
+                        "frames": data["frames"],
+                        "label": int(data["label"]),
+                    }
+                )
 
             result_splits[split_name] = Dataset.from_list(records)
             logger.info(f"  {len(records)}/{len(all_args)} videos kept → {split_name}")
@@ -195,7 +196,7 @@ class PrecomputedDataset:
     def load(
         cache_dir: Path,
         train_transform: Compose | None = None,
-        val_transform:   Compose | None = None,
+        val_transform: Compose | None = None,
     ) -> tuple[Dataset, Dataset]:
         logger.info(f"Loading precomputed dataset from {cache_dir}")
 
@@ -207,23 +208,20 @@ class PrecomputedDataset:
         if train_transform is None:
             train_transform = build_transform(fmt_step + TRAIN_PRESET)
         if val_transform is None:
-            val_transform   = build_transform(fmt_step + VAL_PRESET)
+            val_transform = build_transform(fmt_step + VAL_PRESET)
 
         def _make_transform_fn(transform: Compose) -> Callable:
             def _apply(examples: dict) -> dict:
-                examples["pixel_values"] = [
-                    transform(frames) for frames in examples["frames"]
-                ]
+                examples["pixel_values"] = [transform(frames) for frames in examples["frames"]]
                 examples["labels"] = examples["label"]
                 return examples
+
             return _apply
 
         train_ds = ds["train"]
         train_ds.set_transform(_make_transform_fn(train_transform))
 
-        val_key = next(
-            (k for k in ("val", "validation", "test") if k in ds), None
-        )
+        val_key = next((k for k in ("val", "validation", "test") if k in ds), None)
         if val_key is None:
             raise KeyError(f"No validation split found in {list(ds.keys())}")
         val_ds = ds[val_key]

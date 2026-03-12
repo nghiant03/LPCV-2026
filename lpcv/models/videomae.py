@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
+import numpy as np
 import torch
 from loguru import logger
+from PIL import Image
 from transformers import (
     EvalPrediction,
     Trainer,
@@ -62,9 +64,11 @@ class VideoMAEModelTrainer:
         self,
         config: VideoMAETrainerConfig,
         dataset: DatasetDict,
+        augmentations: dict[str, Callable[[list[Image.Image]], list[Image.Image]]] | None = None,
     ):
         self.config = config
         self.dataset = dataset
+        self.augmentations = augmentations or {}
 
         first_split = next(iter(dataset))
         self.label_names: list[str] = dataset[first_split].features["label"].names
@@ -137,19 +141,39 @@ class VideoMAEModelTrainer:
         else:
             logger.warning(f"Unknown freeze strategy '{strategy}', skipping")
 
-    def _preprocess(self, examples: dict) -> dict:
-        videos = examples["video"]
-        num_frames = self.config.num_frames
+    @staticmethod
+    def _frames_to_pil(frames_array: np.ndarray) -> list[Image.Image]:
+        return [Image.fromarray(frames_array[i]) for i in range(frames_array.shape[0])]
 
-        all_pixel_values = []
-        for video in videos:
-            sampled = subsample(list(video), num_frames)
-            pixel_values = self.processor(sampled, return_tensors="pt")["pixel_values"]
-            all_pixel_values.append(pixel_values.squeeze(0))
+    def _make_preprocess(self, split: str):
+        augment = self.augmentations.get(split)
 
-        examples["pixel_values"] = all_pixel_values
-        examples["labels"] = examples["label"]
-        return examples
+        def _preprocess(examples: dict) -> dict:
+            is_decoded = "frames" in examples
+            num_frames = self.config.num_frames
+
+            all_pixel_values = []
+            sources = examples["frames"] if is_decoded else examples["video"]
+
+            for source in sources:
+                if is_decoded:
+                    frames = self._frames_to_pil(np.array(source))
+                else:
+                    frames = list(source)
+
+                sampled = subsample(frames, num_frames)
+
+                if augment is not None:
+                    sampled = augment(sampled)
+
+                pixel_values = self.processor(sampled, return_tensors="pt")["pixel_values"]
+                all_pixel_values.append(pixel_values.squeeze(0))
+
+            examples["pixel_values"] = all_pixel_values
+            examples["labels"] = examples["label"]
+            return examples
+
+        return _preprocess
 
     def _compute_metrics(self, eval_pred: EvalPrediction) -> dict[str, float]:
         logits = eval_pred.predictions
@@ -171,22 +195,13 @@ class VideoMAEModelTrainer:
         labels = torch.tensor([ex["labels"] for ex in examples], dtype=torch.long)
         return {"pixel_values": pixel_values, "labels": labels}
 
-    @property
-    def _is_precomputed(self) -> bool:
-        first_split = next(iter(self.dataset))
-        return "pixel_values" in self.dataset[first_split].column_names
-
     def train(self) -> Path:
-        if self._is_precomputed:
-            logger.info("Using precomputed dataset")
-            processed = dict(self.dataset)
-        else:
-            logger.info("Setting up lazy preprocessing...")
-            processed = {}
-            for split in self.dataset:
-                ds = self.dataset[split]
-                ds.set_transform(self._preprocess)
-                processed[split] = ds
+        logger.info("Setting up per-split preprocessing...")
+        processed = {}
+        for split in self.dataset:
+            ds = self.dataset[split]
+            ds.set_transform(self._make_preprocess(str(split)))
+            processed[split] = ds
 
         training_args = TrainingArguments(
             output_dir=self.config.output_dir,

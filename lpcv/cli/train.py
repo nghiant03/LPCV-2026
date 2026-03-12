@@ -10,7 +10,9 @@ DEFAULT_NPROC = 1
 
 @app.command()
 def videomae(
-    data_dir: Annotated[Path, typer.Argument(help="Path to QEVD dataset or cached/precomputed DatasetDict.")],
+    data_dir: Annotated[
+        Path, typer.Argument(help="Path to QEVD dataset or cached/precomputed DatasetDict.")
+    ],
     output_dir: Annotated[
         str,
         typer.Option("--output-dir", "-o", help="Directory to save model and checkpoints."),
@@ -49,7 +51,9 @@ def videomae(
     ] = False,
     gradient_accumulation_steps: Annotated[
         int,
-        typer.Option("--grad-accum", help="Gradient accumulation steps for larger effective batch size."),
+        typer.Option(
+            "--grad-accum", help="Gradient accumulation steps for larger effective batch size."
+        ),
     ] = 1,
     gradient_checkpointing: Annotated[
         bool,
@@ -69,7 +73,9 @@ def videomae(
     ] = False,
     is_cache: Annotated[
         bool,
-        typer.Option("--is-cache", help="Treat data_dir as a saved DatasetDict (cached or precomputed)."),
+        typer.Option(
+            "--is-cache", help="Treat data_dir as a saved DatasetDict (cached or precomputed)."
+        ),
     ] = False,
     resume: Annotated[
         str | None,
@@ -89,7 +95,9 @@ def videomae(
     if is_cache:
         dataset = load_from_disk(str(data_dir))
         if not isinstance(dataset, DatasetDict):
-            raise typer.BadParameter(f"Expected DatasetDict at {data_dir}, got {type(dataset).__name__}")
+            raise typer.BadParameter(
+                f"Expected DatasetDict at {data_dir}, got {type(dataset).__name__}"
+            )
     else:
         adapter = QEVDAdapter(data_dir=data_dir)
         dataset = adapter.load()

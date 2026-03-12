@@ -45,24 +45,14 @@ def precompute(
         bool,
         typer.Option("--is-cache", help="Treat data_dir as a saved DatasetDict."),
     ] = False,
-    model_name: Annotated[
-        str,
-        typer.Option("--model-name", "-m", help="Pretrained VideoMAE model name or path."),
-    ] = "MCG-NJU/videomae-base",
-    num_frames: Annotated[
-        int,
-        typer.Option("--num-frames", help="Number of frames to sample per video."),
-    ] = 16,
-    image_size: Annotated[
-        int,
-        typer.Option("--image-size", help="Image size for preprocessing."),
-    ] = 224,
     num_workers: Annotated[
         int | None,
-        typer.Option("--num-workers", "-w", help="Number of parallel workers for preprocessing and saving."),
+        typer.Option(
+            "--num-workers", "-w", help="Number of parallel workers for preprocessing and saving."
+        ),
     ] = None,
 ) -> None:
-    """Precompute dataset: decode videos and save preprocessed tensors to disk."""
+    """Precompute dataset: decode video frames and save to disk."""
     from datasets import DatasetDict, load_from_disk
 
     from lpcv.datasets.precompute import PrecomputedDataset
@@ -71,16 +61,15 @@ def precompute(
     if is_cache:
         dataset = load_from_disk(str(data_dir))
         if not isinstance(dataset, DatasetDict):
-            raise typer.BadParameter(f"Expected DatasetDict at {data_dir}, got {type(dataset).__name__}")
+            raise typer.BadParameter(
+                f"Expected DatasetDict at {data_dir}, got {type(dataset).__name__}"
+            )
     else:
         adapter = QEVDAdapter(data_dir=data_dir)
         dataset = adapter.load()
 
     pds = PrecomputedDataset(
         dataset=dataset,
-        model_name=model_name,
-        num_frames=num_frames,
-        image_size=image_size,
         num_workers=num_workers,
     )
     pds.precompute(output_dir)

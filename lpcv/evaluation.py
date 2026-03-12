@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import torch
 from loguru import logger
+from PIL import Image
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,10 +21,7 @@ def topk_accuracy(
     _, pred = preds.topk(maxk, dim=1, largest=True, sorted=True)
     pred = pred.t()
     correct = pred.eq(targets.view(1, -1).expand_as(pred))
-    return [
-        (correct[:k].reshape(-1).float().sum(0) / preds.size(0)) * 100.0
-        for k in topk
-    ]
+    return [(correct[:k].reshape(-1).float().sum(0) / preds.size(0)) * 100.0 for k in topk]
 
 
 def load_logits_h5(h5_path: str | Path) -> np.ndarray:
@@ -33,9 +31,12 @@ def load_logits_h5(h5_path: str | Path) -> np.ndarray:
     logits = []
     with h5py.File(h5_path, "r") as f:
         grp = f["data/0"]
+        assert isinstance(grp, h5py.Group)
         sorted_keys = sorted(grp.keys(), key=lambda x: int(x.split("_")[1]))
         for k in sorted_keys:
-            logits.append(grp[k][...].squeeze())
+            ds = grp[k]
+            assert isinstance(ds, h5py.Dataset)
+            logits.append(np.asarray(ds[...]).squeeze())
     return np.stack(logits, axis=0)
 
 
@@ -51,9 +52,7 @@ def load_labels_from_manifest(
             record = json.loads(line)
             label = record["label"]
             if label not in class_to_idx:
-                raise KeyError(
-                    f"Label '{label}' from manifest not found in class map."
-                )
+                raise KeyError(f"Label '{label}' from manifest not found in class map.")
             labels.append(class_to_idx[label])
     return labels
 
@@ -84,9 +83,7 @@ def evaluate_h5(
         )
         label_tensor = label_tensor[:n_logits]
     elif n_logits > n_labels:
-        raise ValueError(
-            f"H5 has more results ({n_logits}) than manifest labels ({n_labels})."
-        )
+        raise ValueError(f"H5 has more results ({n_logits}) than manifest labels ({n_labels}).")
 
     if verbose:
         pred_indices = torch.argmax(probs, dim=1)
@@ -96,8 +93,7 @@ def evaluate_h5(
             g = int(label_tensor[i].item())
             marker = "✓" if p == g else "✗"
             logger.info(
-                f"  [{i}] {marker}  pred={idx_to_class[p]} ({p})  "
-                f"gt={idx_to_class[g]} ({g})"
+                f"  [{i}] {marker}  pred={idx_to_class[p]} ({p})  gt={idx_to_class[g]} ({g})"
             )
 
     acc1, acc5 = topk_accuracy(probs, label_tensor, topk=(1, 5))
@@ -110,8 +106,9 @@ def evaluate_model(
     num_frames: int = 16,
     batch_size: int = 8,
     num_workers: int = 4,
+    augmentation: Callable[[list[Image.Image]], list[Image.Image]] | None = None,
 ) -> dict[str, float]:
-    from datasets import DatasetDict, load_dataset
+    from datasets import DatasetDict, load_dataset, load_from_disk
     from transformers import (
         VideoMAEForVideoClassification,
         VideoMAEImageProcessor,
@@ -124,7 +121,11 @@ def evaluate_model(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)  # type: ignore[assignment]
 
-    ds = load_dataset("videofolder", data_dir=str(data_dir))
+    data_path = Path(data_dir) if not isinstance(data_dir, Path) else data_dir
+    try:
+        ds = load_from_disk(str(data_path))
+    except Exception:
+        ds = load_dataset("videofolder", data_dir=str(data_path))
     if not isinstance(ds, DatasetDict):
         raise ValueError("Expected a DatasetDict with train/val splits.")
 
@@ -133,26 +134,38 @@ def evaluate_model(
         raise ValueError(f"No evaluation split found in dataset. Available: {list(ds.keys())}")
 
     eval_ds = ds[eval_split_name]
+    is_decoded = "frames" in eval_ds.column_names
+
+    def _frames_to_pil(frames_array: np.ndarray) -> list[Image.Image]:
+        return [Image.fromarray(frames_array[i]) for i in range(frames_array.shape[0])]
 
     def preprocess(examples: dict) -> dict:
-        videos = examples["video"]
+        from lpcv.datasets.utils import subsample
+
         all_pixel_values = []
-        for video in videos:
-            frames = list(video)
-            total = len(frames)
-            if total >= num_frames:
-                indices = torch.linspace(0, total - 1, num_frames).long().tolist()
-                sampled = [frames[i] for i in indices]
+        sources = examples["frames"] if is_decoded else examples["video"]
+
+        for source in sources:
+            if is_decoded:
+                frames = _frames_to_pil(np.array(source))
             else:
-                sampled = frames + [frames[-1]] * (num_frames - total)
+                frames = list(source)
+
+            sampled = subsample(frames, num_frames, mode="uniform")
+
+            if augmentation is not None:
+                sampled = augmentation(sampled)
+
             pixel_values = processor(sampled, return_tensors="pt")["pixel_values"]
             all_pixel_values.append(pixel_values.squeeze(0))
+
         examples["pixel_values"] = all_pixel_values
         examples["labels"] = examples["label"]
         return examples
 
     logger.info(f"Preprocessing {len(eval_ds)} evaluation samples...")
-    processed = eval_ds.map(preprocess, batched=True, batch_size=4, remove_columns=["video"])
+    cols_to_remove = ["frames"] if is_decoded else ["video"]
+    processed = eval_ds.map(preprocess, batched=True, batch_size=4, remove_columns=cols_to_remove)
     processed.set_format("torch")
 
     all_logits = []
@@ -162,9 +175,7 @@ def evaluate_model(
     for i in range(0, len(processed), batch_size):
         batch_items = [processed[j] for j in range(i, min(i + batch_size, len(processed)))]
         pixel_values = torch.stack([item["pixel_values"] for item in batch_items]).to(device)
-        labels = torch.tensor(
-            [item["labels"] for item in batch_items], dtype=torch.long
-        )
+        labels = torch.tensor([item["labels"] for item in batch_items], dtype=torch.long)
 
         with torch.no_grad():
             outputs = model(pixel_values=pixel_values)

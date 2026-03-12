@@ -46,6 +46,23 @@ class PrecomputedDataset:
         video = torch.stack(
             [torch.from_numpy(np.array(f)).permute(2, 0, 1) for f in frames]
         ).float()
+
+        t, c, h, w = video.shape
+        short_side = min(h, w)
+        scale = self.short_side / short_side
+        new_h, new_w = int(h * scale), int(w * scale)
+        alloc_bytes = t * c * new_h * new_w * 4
+        logger.debug(
+            f"Resize {h}x{w} -> {new_h}x{new_w} "
+            f"(frames={t}, scale={scale:.2f}, alloc={alloc_bytes / 1e9:.2f}GB)"
+        )
+        if alloc_bytes > 2e9:
+            logger.warning(
+                f"Skipping video with extreme resize: {h}x{w} -> {new_h}x{new_w} "
+                f"(alloc={alloc_bytes / 1e9:.2f}GB)"
+            )
+            return {"frames": None, "label": example["label"]}
+
         video = self._resize(video)
         frames_chw = video.to(torch.uint8).numpy()
         return {"frames": frames_chw, "label": example["label"]}

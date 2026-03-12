@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "torch>=2.10.0",
     "torchcodec>=0.10.0",
+    "torchvision>=0.25.0",
     "tqdm>=4.67.3",
     "transformers>=5.3.0",
     "typer>=0.24.1",
@@ -51,3 +52,4 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "TCH"]
+ignore = ["N812"]

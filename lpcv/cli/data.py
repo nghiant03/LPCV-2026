@@ -51,6 +51,14 @@ def precompute(
             "--num-workers", "-w", help="Number of parallel workers for preprocessing and saving."
         ),
     ] = None,
+    short_side: Annotated[
+        int,
+        typer.Option("--short-side", help="Resize frames so the short edge is this many pixels."),
+    ] = 320,
+    max_frames: Annotated[
+        int | None,
+        typer.Option("--max-frames", help="Cap videos at this many frames via uniform sampling."),
+    ] = 64,
 ) -> None:
     """Precompute dataset: decode video frames and save to disk."""
     from datasets import DatasetDict, load_from_disk
@@ -66,11 +74,13 @@ def precompute(
             )
     else:
         adapter = QEVDAdapter(data_dir=data_dir)
-        dataset = adapter.load()
+        dataset = adapter.load_raw()
 
     pds = PrecomputedDataset(
         dataset=dataset,
         num_workers=num_workers,
+        short_side=short_side,
+        max_frames=max_frames,
     )
     pds.precompute(output_dir)
 
@@ -87,4 +97,4 @@ def cache(
     from lpcv.datasets.qevd import QEVDAdapter
 
     adapter = QEVDAdapter(data_dir=data_dir)
-    adapter.load(cache_dir=cache_dir)
+    adapter.load_raw(cache_dir=cache_dir)

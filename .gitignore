@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data
+data/
+*.mp4
+*.npy
+*.h5
+*.bin
+
+# Model checkpoints
+*.pth
+*.onnx
+export_assets/

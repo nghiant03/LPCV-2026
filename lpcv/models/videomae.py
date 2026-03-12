@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 from loguru import logger
-from PIL import Image
 from transformers import (
     EvalPrediction,
     Trainer,
@@ -16,10 +14,8 @@ from transformers import (
     VideoMAEImageProcessor,
 )
 
-from lpcv.datasets.utils import subsample
-
 if TYPE_CHECKING:
-    from datasets import DatasetDict
+    from datasets import Dataset
 
 DEFAULT_MODEL_NAME = "MCG-NJU/videomae-base"
 DEFAULT_NUM_FRAMES = 16
@@ -63,15 +59,17 @@ class VideoMAEModelTrainer:
     def __init__(
         self,
         config: VideoMAETrainerConfig,
-        dataset: DatasetDict,
-        augmentations: dict[str, Callable[[list[Image.Image]], list[Image.Image]]] | None = None,
+        train_dataset: Dataset,
+        eval_dataset: Dataset,
     ):
         self.config = config
-        self.dataset = dataset
-        self.augmentations = augmentations or {}
+        self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
 
-        first_split = next(iter(dataset))
-        self.label_names: list[str] = dataset[first_split].features["label"].names
+        label_feature = train_dataset.features.get("label")
+        if label_feature is None:
+            raise ValueError("Dataset must have a 'label' feature for label metadata")
+        self.label_names: list[str] = label_feature.names
         self.num_labels = len(self.label_names)
         self.label2id = {name: i for i, name in enumerate(self.label_names)}
         self.id2label = {i: name for i, name in enumerate(self.label_names)}
@@ -141,40 +139,6 @@ class VideoMAEModelTrainer:
         else:
             logger.warning(f"Unknown freeze strategy '{strategy}', skipping")
 
-    @staticmethod
-    def _frames_to_pil(frames_array: np.ndarray) -> list[Image.Image]:
-        return [Image.fromarray(frames_array[i]) for i in range(frames_array.shape[0])]
-
-    def _make_preprocess(self, split: str):
-        augment = self.augmentations.get(split)
-
-        def _preprocess(examples: dict) -> dict:
-            is_decoded = "frames" in examples
-            num_frames = self.config.num_frames
-
-            all_pixel_values = []
-            sources = examples["frames"] if is_decoded else examples["video"]
-
-            for source in sources:
-                if is_decoded:
-                    frames = self._frames_to_pil(np.array(source))
-                else:
-                    frames = list(source)
-
-                sampled = subsample(frames, num_frames)
-
-                if augment is not None:
-                    sampled = augment(sampled)
-
-                pixel_values = self.processor(sampled, return_tensors="pt")["pixel_values"]
-                all_pixel_values.append(pixel_values.squeeze(0))
-
-            examples["pixel_values"] = all_pixel_values
-            examples["labels"] = examples["label"]
-            return examples
-
-        return _preprocess
-
     def _compute_metrics(self, eval_pred: EvalPrediction) -> dict[str, float]:
         logits = eval_pred.predictions
         labels = eval_pred.label_ids
@@ -196,13 +160,6 @@ class VideoMAEModelTrainer:
         return {"pixel_values": pixel_values, "labels": labels}
 
     def train(self) -> Path:
-        logger.info("Setting up per-split preprocessing...")
-        processed = {}
-        for split in self.dataset:
-            ds = self.dataset[split]
-            ds.set_transform(self._make_preprocess(str(split)))
-            processed[split] = ds
-
         training_args = TrainingArguments(
             output_dir=self.config.output_dir,
             num_train_epochs=self.config.num_train_epochs,
@@ -230,14 +187,11 @@ class VideoMAEModelTrainer:
             **self.config.extra_args,
         )
 
-        train_ds = processed["train"]
-        eval_ds = processed.get("val", processed.get("validation", processed.get("test")))
-
         trainer = Trainer(
             model=self.model,
             args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
             compute_metrics=self._compute_metrics,
             data_collator=self._collate_fn,
         )

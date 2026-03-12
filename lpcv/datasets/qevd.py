@@ -1,12 +1,14 @@
 import json
 import re
 import shutil
+from collections.abc import Callable
 from functools import cached_property
 from pathlib import Path
 
-from datasets import DatasetDict, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from loguru import logger
 from pydantic import BaseModel
+from torchvision.transforms import Compose
 from tqdm.contrib.concurrent import process_map
 
 from lpcv.datasets.info import SPLIT_DIRS, TARGET_LABEL_FILE_NAME
@@ -14,6 +16,7 @@ from lpcv.datasets.utils import (
     check_video_integrity,
     is_compatible_with_dataset,
 )
+from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
 
 FOLDER_PATTERN = "QEVD-FIT-300k-Part-"
 SOURCE_LABEL_FILE_NAME = "fine_grained_labels.json"
@@ -163,7 +166,41 @@ class QEVDAdapter:
 
         shutil.move(self.source_label_path, self.data_dir)
 
-    def load(self, cache_dir: Path | None = None) -> DatasetDict:
+    def load(
+        self,
+        cache_dir: Path | None = None,
+        train_transform: Compose | None = None,
+        val_transform: Compose | None = None,
+    ) -> tuple[Dataset, Dataset]:
+        ds = self.load_raw(cache_dir)
+
+        fmt_step = [{"name": "FromVideo"}]
+        if train_transform is None:
+            train_transform = build_transform(fmt_step + TRAIN_PRESET)
+        if val_transform is None:
+            val_transform = build_transform(fmt_step + VAL_PRESET)
+
+        def _make_transform_fn(transform: Compose) -> Callable:
+            def _apply(examples: dict) -> dict:
+                examples["pixel_values"] = [
+                    transform(video) for video in examples["video"]
+                ]
+                examples["labels"] = examples["label"]
+                return examples
+            return _apply
+
+        train_ds = ds["train"]
+        train_ds.set_transform(_make_transform_fn(train_transform))
+
+        val_key = next((k for k in ("val", "validation", "test") if k in ds), None)
+        if val_key is None:
+            raise KeyError(f"No validation split found in {list(ds.keys())}")
+        val_ds = ds[val_key]
+        val_ds.set_transform(_make_transform_fn(val_transform))
+
+        return train_ds, val_ds
+
+    def load_raw(self, cache_dir: Path | None = None) -> DatasetDict:
         if cache_dir is not None and cache_dir.is_dir():
             logger.info(f"Loading cached dataset from {cache_dir}")
             ds = load_from_disk(str(cache_dir))

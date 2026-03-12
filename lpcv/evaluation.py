@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Callable
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -9,7 +10,7 @@ from loguru import logger
 from PIL import Image
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
 
 
 def topk_accuracy(
@@ -146,10 +147,7 @@ def evaluate_model(
         sources = examples["frames"] if is_decoded else examples["video"]
 
         for source in sources:
-            if is_decoded:
-                frames = _frames_to_pil(np.array(source))
-            else:
-                frames = list(source)
+            frames = _frames_to_pil(np.array(source)) if is_decoded else list(source)
 
             sampled = subsample(frames, num_frames, mode="uniform")
 

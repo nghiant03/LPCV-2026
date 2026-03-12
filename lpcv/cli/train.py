@@ -87,20 +87,15 @@ def videomae(
     ] = DEFAULT_NPROC,
 ) -> None:
     """Train a VideoMAE model on the QEVD dataset."""
-    from datasets import DatasetDict, load_from_disk
-
+    from lpcv.datasets.precompute import PrecomputedDataset
     from lpcv.datasets.qevd import QEVDAdapter
     from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
 
     if is_cache:
-        dataset = load_from_disk(str(data_dir))
-        if not isinstance(dataset, DatasetDict):
-            raise typer.BadParameter(
-                f"Expected DatasetDict at {data_dir}, got {type(dataset).__name__}"
-            )
+        train_ds, eval_ds = PrecomputedDataset.load(data_dir)
     else:
         adapter = QEVDAdapter(data_dir=data_dir)
-        dataset = adapter.load()
+        train_ds, eval_ds = adapter.load()
 
     config = VideoMAETrainerConfig(
         model_name=model_name,
@@ -121,6 +116,12 @@ def videomae(
         resume_from_checkpoint=resume,
     )
 
+    def run() -> None:
+        trainer = VideoMAEModelTrainer(
+            config=config, train_dataset=train_ds, eval_dataset=eval_ds
+        )
+        trainer.train()
+
     if num_gpus > 1:
         from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 
@@ -131,12 +132,6 @@ def videomae(
             rdzv_backend="static",
             rdzv_endpoint="localhost:0",
         )
-
-        def _worker() -> None:
-            trainer = VideoMAEModelTrainer(config=config, dataset=dataset)
-            trainer.train()
-
-        elastic_launch(launch_config, _worker)()
+        elastic_launch(launch_config, run)()
     else:
-        trainer = VideoMAEModelTrainer(config=config, dataset=dataset)
-        trainer.train()
+        run()

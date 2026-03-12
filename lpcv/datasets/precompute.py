@@ -44,7 +44,7 @@ class PrecomputedDataset:
         import torch
 
         video = torch.stack(
-            [torch.from_numpy(np.array(f)).permute(2, 0, 1) for f in frames]
+            [torch.from_numpy(np.array(f)) for f in frames]
         ).float()
 
         t, c, h, w = video.shape

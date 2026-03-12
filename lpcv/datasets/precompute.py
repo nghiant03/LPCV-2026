@@ -1,29 +1,32 @@
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import shutil
 from functools import partial
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
-from datasets import Dataset, DatasetDict, Video, load_from_disk
-from decord import VideoReader, cpu
+import torch
+from datasets import Video
 from loguru import logger
+from torch.utils.data import Dataset as TorchDataset
 from tqdm import tqdm
 
 from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
-
+    from datasets import DatasetDict
     from torchvision.transforms import Compose
 
 DEFAULT_SHORT_SIDE = 320
 DEFAULT_MAX_FRAMES = 64
+JPEG_QUALITY = 85
 
 _CHECKPOINT_DIR_NAME = "_precompute_ckpt"
+_METADATA_FILE = "metadata.json"
 _FAIL_SENTINEL = b""
 
 
@@ -38,10 +41,12 @@ def _worker(
     max_frames: int | None,
     ckpt_dir: str,
 ) -> int | None:
-    """Decode one video, save to checkpoint dir, return idx on success."""
+    """Decode one video, JPEG-encode frames, save to checkpoint dir."""
     idx, row = args
 
     ckpt_path = f"{ckpt_dir}/{idx}.npz"
+    if _is_done(ckpt_path):
+        return idx
 
     video_info = row.get("video")
     video_path = video_info.get("path") if isinstance(video_info, dict) else None
@@ -50,6 +55,8 @@ def _worker(
         return None
 
     try:
+        from decord import VideoReader, cpu
+
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
         total = len(vr)
         if total == 0:
@@ -71,17 +78,52 @@ def _worker(
         _mark_failed(ckpt_path)
         return None
 
+    jpeg_frames = _encode_jpeg_batch(frames)
+
     tmp_path = f"{ckpt_dir}/{idx}.tmp.npz"
-    np.savez_compressed(tmp_path, frames=frames, label=np.array(int(row["label"])))
+    frame_data: dict[str, np.ndarray] = {f"f{i}": buf for i, buf in enumerate(jpeg_frames)}
+    frame_data["label"] = np.array(int(row["label"]))
+    np.savez(tmp_path, **frame_data)  # type: ignore[arg-type]
     shutil.move(tmp_path, ckpt_path)
     return idx
 
 
+def _is_done(ckpt_path: str) -> bool:
+    p = Path(ckpt_path)
+    return p.exists() and p.stat().st_size > 0
+
+
 def _mark_failed(ckpt_path: str) -> None:
     """Write a zero-byte sentinel so we don't retry known-bad videos."""
-    from pathlib import Path as _P
+    Path(ckpt_path).write_bytes(_FAIL_SENTINEL)
 
-    _P(ckpt_path).write_bytes(_FAIL_SENTINEL)
+
+def _encode_jpeg_batch(frames: np.ndarray) -> list[np.ndarray]:
+    """JPEG-encode each frame (T, H, W, C) → list of 1-D uint8 arrays."""
+    result = []
+    for i in range(frames.shape[0]):
+        bgr = cv2.cvtColor(frames[i], cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not ok:
+            raise RuntimeError(f"JPEG encode failed for frame {i}")
+        result.append(buf.ravel())
+    return result
+
+
+def _decode_jpeg_batch(npz_data: dict[str, Any]) -> np.ndarray:
+    """Decode JPEG buffers from npz back to (T, H, W, C) uint8 numpy array."""
+    frame_keys = sorted(
+        (k for k in npz_data if k.startswith("f")),
+        key=lambda k: int(k[1:]),
+    )
+    frames = []
+    for k in frame_keys:
+        buf = npz_data[k]
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError(f"JPEG decode failed for key {k}")
+        frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    return np.stack(frames)
 
 
 def _resize(frames: np.ndarray, short_side: int) -> np.ndarray | None:
@@ -99,6 +141,53 @@ def _resize(frames: np.ndarray, short_side: int) -> np.ndarray | None:
     return np.stack(
         [cv2.resize(frames[i], (new_w, new_h), interpolation=cv2.INTER_LINEAR) for i in range(t)]
     )
+
+
+# ---------------------------------------------------------------------------
+# Lazy dataset backed by per-video .npz checkpoint files
+# ---------------------------------------------------------------------------
+
+
+class _LazyNpzDataset(TorchDataset):
+    """Torch Dataset that lazily reads JPEG-encoded npz files and applies transforms."""
+
+    def __init__(
+        self,
+        npz_paths: list[Path],
+        labels: list[int],
+        transform: Compose | None = None,
+    ):
+        self.npz_paths = npz_paths
+        self.labels = labels
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.npz_paths)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        data = np.load(self.npz_paths[index])
+        frames = _decode_jpeg_batch(data)  # (T, H, W, C) uint8
+
+        video = torch.from_numpy(frames).permute(0, 3, 1, 2).float()  # (T, C, H, W)
+        if self.transform is not None:
+            video = self.transform(video)
+
+        return {"pixel_values": video, "labels": self.labels[index]}
+
+
+class _FakeClassLabel:
+    """Minimal stand-in for datasets.ClassLabel so VideoMAEModelTrainer can read label names."""
+
+    def __init__(self, names: list[str]):
+        self.names = names
+        self.num_classes = len(names)
+
+
+class _FakeFeatures(dict):  # type: ignore[type-arg]
+    """Minimal dict that satisfies trainer.features.get('label')."""
+
+    def __init__(self, label_names: list[str]):
+        super().__init__({"label": _FakeClassLabel(label_names)})
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +214,11 @@ class PrecomputedDataset:
     # Precompute
     # ------------------------------------------------------------------
 
-    def precompute(self, output_dir: Path) -> DatasetDict:
+    def precompute(self, output_dir: Path) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         ckpt_root = output_dir / _CHECKPOINT_DIR_NAME
-        result_splits: dict[str, Dataset] = {}
+
+        metadata: dict[str, Any] = {"splits": {}}
 
         for split_name, split_ds in self.dataset.items():
             split_name = str(split_name)
@@ -139,9 +229,13 @@ class PrecomputedDataset:
 
             all_args = list(enumerate(split_ds))
             done_ids = {
-                int(p.stem) for p in ckpt_dir.iterdir() if p.suffix == ".npz" and p.stem.isdigit()
+                int(p.stem)
+                for p in ckpt_dir.iterdir()
+                if p.suffix == ".npz" and p.stem.isdigit() and p.stat().st_size > 0
             }
-            pending = [a for a in all_args if a[0] not in done_ids]
+            pending: list[tuple[int, dict]] = [
+                (i, dict(row)) for i, row in all_args if i not in done_ids
+            ]
 
             logger.info(
                 f"Precomputing {split_name}: {len(split_ds)} total, "
@@ -165,31 +259,27 @@ class PrecomputedDataset:
                     ):
                         pass
 
-            records: list[dict] = []
-            for p in sorted(ckpt_dir.iterdir()):
-                if p.suffix != ".npz" or p.stat().st_size == 0:
-                    continue
-                data = np.load(p)
-                records.append(
-                    {
-                        "frames": data["frames"],
-                        "label": int(data["label"]),
-                    }
-                )
+            label_feature = split_ds.features.get("label")
+            label_names = list(label_feature.names) if label_feature else []
 
-            result_splits[split_name] = Dataset.from_list(records)
-            logger.info(f"  {len(records)}/{len(all_args)} videos kept → {split_name}")
+            kept = sum(
+                1
+                for p in ckpt_dir.iterdir()
+                if p.suffix == ".npz" and p.stem.isdigit() and p.stat().st_size > 0
+            )
+            metadata["splits"][split_name] = {
+                "total": len(all_args),
+                "kept": kept,
+                "label_names": label_names,
+            }
+            logger.info(f"  {kept}/{len(all_args)} videos kept → {split_name}")
 
-        result = DatasetDict(result_splits)
-        result.save_to_disk(str(output_dir), num_proc=self.num_workers)
-
-        shutil.rmtree(ckpt_root, ignore_errors=True)
-        logger.info(f"Precomputed DatasetDict saved to {output_dir}")
-
-        return result
+        meta_path = output_dir / _METADATA_FILE
+        meta_path.write_text(json.dumps(metadata, indent=2))
+        logger.info(f"Precomputed checkpoints saved to {output_dir}")
 
     # ------------------------------------------------------------------
-    # Load — returns HF Datasets compatible with Trainer
+    # Load — returns torch Datasets compatible with HF Trainer
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -197,34 +287,53 @@ class PrecomputedDataset:
         cache_dir: Path,
         train_transform: Compose | None = None,
         val_transform: Compose | None = None,
-    ) -> tuple[Dataset, Dataset]:
+    ) -> tuple[_LazyNpzDataset, _LazyNpzDataset]:
+        cache_dir = Path(cache_dir)
         logger.info(f"Loading precomputed dataset from {cache_dir}")
 
-        ds = load_from_disk(str(cache_dir))
-        if not isinstance(ds, DatasetDict):
-            raise TypeError(f"Expected DatasetDict, got {type(ds).__name__}")
+        meta_path = cache_dir / _METADATA_FILE
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"Metadata file not found: {meta_path}. Run 'precompute' first or check the path."
+            )
 
-        fmt_step = [{"name": "FromNumpy"}]
+        metadata = json.loads(meta_path.read_text())
+        splits = metadata["splits"]
+
+        ckpt_root = cache_dir / _CHECKPOINT_DIR_NAME
+
         if train_transform is None:
-            train_transform = build_transform(fmt_step + TRAIN_PRESET)
+            train_transform = build_transform(TRAIN_PRESET)
         if val_transform is None:
-            val_transform = build_transform(fmt_step + VAL_PRESET)
+            val_transform = build_transform(VAL_PRESET)
 
-        def _make_transform_fn(transform: Compose) -> Callable:
-            def _apply(examples: dict) -> dict:
-                examples["pixel_values"] = [transform(frames) for frames in examples["frames"]]
-                examples["labels"] = examples["label"]
-                return examples
+        def _build_split(split_name: str, transform: Compose) -> _LazyNpzDataset:
+            ckpt_dir = ckpt_root / split_name
+            npz_paths: list[Path] = []
+            labels: list[int] = []
 
-            return _apply
+            for p in sorted(
+                ckpt_dir.iterdir(), key=lambda x: int(x.stem) if x.stem.isdigit() else -1
+            ):
+                if p.suffix != ".npz" or not p.stem.isdigit():
+                    continue
+                if p.stat().st_size == 0:
+                    continue
+                data = np.load(p, mmap_mode="r")
+                npz_paths.append(p)
+                labels.append(int(data["label"]))
 
-        train_ds = ds["train"]
-        train_ds.set_transform(_make_transform_fn(train_transform))
+            ds = _LazyNpzDataset(npz_paths, labels, transform)
+            label_names = splits[split_name].get("label_names", [])
+            ds.features = _FakeFeatures(label_names)  # type: ignore[attr-defined]
+            logger.info(f"  Loaded {split_name}: {len(npz_paths)} samples")
+            return ds
 
-        val_key = next((k for k in ("val", "validation", "test") if k in ds), None)
+        train_ds = _build_split("train", train_transform)
+
+        val_key = next((k for k in ("val", "validation", "test") if k in splits), None)
         if val_key is None:
-            raise KeyError(f"No validation split found in {list(ds.keys())}")
-        val_ds = ds[val_key]
-        val_ds.set_transform(_make_transform_fn(val_transform))
+            raise KeyError(f"No validation split found in {list(splits.keys())}")
+        val_ds = _build_split(val_key, val_transform)
 
         return train_ds, val_ds

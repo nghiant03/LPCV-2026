@@ -1,186 +1,144 @@
-from __future__ import annotations
+import shutil
+from pathlib import Path
 
-import multiprocessing as mp
-from functools import partial
-from typing import TYPE_CHECKING
-
-import cv2
+import av
 import numpy as np
-from datasets import Dataset, DatasetDict, Video, load_from_disk
-from decord import VideoReader, cpu
+from av.video.stream import VideoStream
 from loguru import logger
-from tqdm import tqdm
 
-from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
+from lpcv.datasets.info import SPLIT_DIRS, VIDEO_EXTENSIONS
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
-
-    from torchvision.transforms import Compose
-
-DEFAULT_SHORT_SIDE = 320
-DEFAULT_MAX_FRAMES = 64
+MIN_DIMENSION = 16
+MAX_ASPECT_RATIO = 10.0
 
 
-# ---------------------------------------------------------------------------
-# Module-level worker — must be a plain function to be picklable by mp.Pool
-# ---------------------------------------------------------------------------
+def is_compatible_with_dataset(data_dir: Path):
+    if not data_dir.is_dir():
+        return False
 
-def _worker(
-    args: tuple[int, dict],
-    short_side: int,
-    max_frames: int | None,
-) -> dict | None:
-    """Decode one video and return {"frames": ndarray, "label": int} or None."""
-    idx, row = args
+    split_dirs = [d for d in data_dir.iterdir() if d.is_dir() and d.name in SPLIT_DIRS]
+    if not split_dirs:
+        return False
 
-    video_info = row.get("video")
-    video_path = video_info.get("path") if isinstance(video_info, dict) else None
-    if not video_path:
-        return None
+    for split_dir in split_dirs:
+        class_dirs = [d for d in split_dir.iterdir() if d.is_dir()]
+        if not class_dirs:
+            return False
+        if not any(
+            f.suffix.lower() in VIDEO_EXTENSIONS
+            for class_dir in class_dirs
+            for f in class_dir.iterdir()
+            if f.is_file()
+        ):
+            return False
 
+    return True
+
+
+def probe_video(path: Path) -> bool:
     try:
-        vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
-        total = len(vr)
-        if total == 0:
-            return None
-
-        n = min(max_frames, total) if max_frames else total
-        indices = np.linspace(0, total - 1, n).astype(int)
-
-        # get_batch stays in C++ — single GIL crossing for the whole batch
-        frames = vr.get_batch(indices).asnumpy()  # (T, H, W, C) uint8
+        with av.open(str(path)) as container:
+            video_streams = container.streams.video
+            if not video_streams:
+                return False
+            stream = video_streams[0]
+            stream.codec_context.skip_frame = "NONKEY"
+            for _ in container.decode(stream):
+                break
+        return True
     except Exception:
-        logger.warning(f"[{idx}] Failed to decode: {video_path}")
+        logger.debug(f"Failed to probe {path} with pyav.")
+        return False
+
+
+def remux_video(src: Path) -> Path | None:
+    remuxed_path = src.with_suffix(".remux" + src.suffix)
+    try:
+        with av.open(str(src)) as input_container:
+            input_stream = input_container.streams.video[0]
+            with av.open(str(remuxed_path), mode="w") as output_container:
+                output_stream = output_container.add_stream(
+                    codec_name=input_stream.codec_context.name,
+                    rate=input_stream.base_rate,
+                )
+                assert isinstance(output_stream, VideoStream)
+                output_stream.width = input_stream.codec_context.width
+                output_stream.height = input_stream.codec_context.height
+
+                for packet in input_container.demux(input_stream):
+                    if packet.dts is None:
+                        continue
+                    packet.stream = output_stream
+                    output_container.mux(packet)
+
+        shutil.move(remuxed_path, src)
+        return src
+    except Exception:
+        if remuxed_path.is_file():
+            remuxed_path.unlink()
+        logger.debug(f"Failed to remux {src}.")
         return None
 
-    frames = _resize(frames, short_side)
-    if frames is None:
-        logger.warning(f"[{idx}] Skipped oversized video: {video_path}")
-        return None
 
-    return {"frames": frames, "label": int(row["label"])}
+def check_video_integrity(src: Path) -> bool:
+    if probe_video(src):
+        return True
 
-
-def _resize(frames: np.ndarray, short_side: int) -> np.ndarray | None:
-    t, h, w, _ = frames.shape
-    ss = min(h, w)
-    if ss == short_side:
-        return frames
-
-    scale = short_side / ss
-    new_h, new_w = int(round(h * scale)), int(round(w * scale))
-
-    if t * 3 * new_h * new_w > 500_000_000:
-        return None
-
-    return np.stack([
-        cv2.resize(frames[i], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        for i in range(t)
-    ])
+    remuxed = remux_video(src)
+    return bool(remuxed is not None and probe_video(remuxed))
 
 
-# ---------------------------------------------------------------------------
-# Main class
-# ---------------------------------------------------------------------------
+def check_video_dimensions(
+    src: Path,
+    *,
+    min_dim: int = MIN_DIMENSION,
+    max_aspect_ratio: float = MAX_ASPECT_RATIO,
+) -> bool:
+    try:
+        with av.open(str(src)) as container:
+            stream = container.streams.video[0]
+            w = stream.codec_context.width
+            h = stream.codec_context.height
+    except Exception:
+        logger.debug(f"Failed to read dimensions for {src}")
+        return False
 
-class PrecomputedDataset:
-    def __init__(
-        self,
-        dataset: DatasetDict,
-        num_workers: int | None = None,
-        short_side: int = DEFAULT_SHORT_SIDE,
-        max_frames: int | None = DEFAULT_MAX_FRAMES,
-        chunksize: int = 16,
-    ):
-        self.dataset     = dataset
-        self.num_workers = num_workers or mp.cpu_count()
-        self.short_side  = short_side
-        self.max_frames  = max_frames
-        self.chunksize   = chunksize
+    if w < min_dim or h < min_dim:
+        logger.debug(f"Dimensions too small ({w}x{h}): {src}")
+        return False
 
-    # ------------------------------------------------------------------
-    # Precompute
-    # ------------------------------------------------------------------
+    aspect = max(w, h) / max(min(w, h), 1)
+    if aspect > max_aspect_ratio:
+        logger.debug(f"Extreme aspect ratio {aspect:.1f} ({w}x{h}): {src}")
+        return False
 
-    def precompute(self, output_dir: Path) -> DatasetDict:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        result_splits: dict[str, Dataset] = {}
+    return True
 
-        for split_name, split_ds in self.dataset.items():
-            split_name = str(split_name)
-            split_ds   = split_ds.cast_column("video", Video(decode=False))
 
-            logger.info(
-                f"Precomputing {split_name}: {len(split_ds)} videos "
-                f"(workers={self.num_workers}, short_side={self.short_side}, "
-                f"max_frames={self.max_frames})"
-            )
+def subsample(
+    frames: list,
+    num_frames: int = 16,
+    *,
+    mode: str = "dense",
+    stride: int = 4,
+) -> list:
+    total = len(frames)
+    if total == 0:
+        return []
 
-            fn   = partial(_worker, short_side=self.short_side, max_frames=self.max_frames)
-            args = list(enumerate(split_ds))
+    if mode == "dense":
+        window_size = num_frames * stride
+        if total >= window_size:
+            start = int(np.random.randint(0, total - window_size + 1))
+            indices = list(range(start, start + window_size, stride))
+            return [frames[i] for i in indices]
+        # fallback to uniform when video is too short
+        indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
+        return [frames[i] for i in indices]
 
-            records: list[dict] = []
-            with mp.Pool(self.num_workers) as pool:
-                for result in tqdm(
-                    pool.imap_unordered(fn, args, chunksize=self.chunksize),
-                    total=len(args),
-                    desc=split_name,
-                ):
-                    if result is not None:
-                        records.append(result)
+    # uniform mode
+    if total >= num_frames:
+        indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
+        return [frames[i] for i in indices]
 
-            # Trainer shuffles anyway so ordering doesn't matter here
-            result_splits[split_name] = Dataset.from_list(records)
-            logger.info(f"  {len(records)}/{len(args)} videos kept → {split_name}")
-
-        result = DatasetDict(result_splits)
-        result.save_to_disk(str(output_dir), num_proc=self.num_workers)
-        logger.info(f"Precomputed DatasetDict saved to {output_dir}")
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Load — returns HF Datasets compatible with Trainer
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def load(
-        cache_dir: Path,
-        train_transform: Compose | None = None,
-        val_transform:   Compose | None = None,
-    ) -> tuple[Dataset, Dataset]:
-        logger.info(f"Loading precomputed dataset from {cache_dir}")
-
-        ds = load_from_disk(str(cache_dir))
-        if not isinstance(ds, DatasetDict):
-            raise TypeError(f"Expected DatasetDict, got {type(ds).__name__}")
-
-        fmt_step = [{"name": "FromNumpy"}]
-        if train_transform is None:
-            train_transform = build_transform(fmt_step + TRAIN_PRESET)
-        if val_transform is None:
-            val_transform   = build_transform(fmt_step + VAL_PRESET)
-
-        def _make_transform_fn(transform: Compose) -> Callable:
-            def _apply(examples: dict) -> dict:
-                examples["pixel_values"] = [
-                    transform(frames) for frames in examples["frames"]
-                ]
-                examples["labels"] = examples["label"]
-                return examples
-            return _apply
-
-        train_ds = ds["train"]
-        train_ds.set_transform(_make_transform_fn(train_transform))
-
-        val_key = next(
-            (k for k in ("val", "validation", "test") if k in ds), None
-        )
-        if val_key is None:
-            raise KeyError(f"No validation split found in {list(ds.keys())}")
-        val_ds = ds[val_key]
-        val_ds.set_transform(_make_transform_fn(val_transform))
-
-        return train_ds, val_ds
+    return frames + [frames[-1]] * (num_frames - total)

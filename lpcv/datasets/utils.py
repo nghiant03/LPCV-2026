@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 
 import av
-import torch
+import numpy as np
 from av.video.stream import VideoStream
 from loguru import logger
 
@@ -85,23 +85,30 @@ def check_video_integrity(src: Path) -> bool:
     return bool(remuxed is not None and probe_video(remuxed))
 
 
-def subsample(frames: list, num_frames: int) -> list:
+def subsample(
+    frames: list,
+    num_frames: int = 16,
+    *,
+    mode: str = "dense",
+    stride: int = 4,
+) -> list:
     total = len(frames)
     if total == 0:
         return []
 
+    if mode == "dense":
+        window_size = num_frames * stride
+        if total >= window_size:
+            start = int(np.random.randint(0, total - window_size + 1))
+            indices = list(range(start, start + window_size, stride))
+            return [frames[i] for i in indices]
+        # fallback to uniform when video is too short
+        indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
+        return [frames[i] for i in indices]
+
+    # uniform mode
     if total >= num_frames:
-        indices = torch.linspace(0, total - 1, num_frames).long().tolist()
+        indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
         return [frames[i] for i in indices]
 
     return frames + [frames[-1]] * (num_frames - total)
-
-
-def sample_frames(video_path: Path, num_frames: int) -> list:
-    frames = []
-    with av.open(str(video_path)) as container:
-        stream = container.streams.video[0]
-        for frame in container.decode(stream):
-            frames.append(frame.to_image())
-
-    return subsample(frames, num_frames)

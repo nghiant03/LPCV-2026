@@ -18,9 +18,7 @@ from lpcv.datasets.utils import (
 FOLDER_PATTERN = "QEVD-FIT-300k-Part-"
 SOURCE_LABEL_FILE_NAME = "fine_grained_labels.json"
 QUARANTINE_DIR_NAME = "quarantine"
-SPLIT_MAP = {
-    "test": "val"
-}
+SPLIT_MAP = {"test": "val"}
 CHUNK_SIZE = 10000
 
 
@@ -48,8 +46,7 @@ class QEVDAdapter:
             probe_path = self.data_dir / TARGET_LABEL_FILE_NAME
             if not probe_path.is_file():
                 raise FileNotFoundError(
-                    f"No target labels provided."
-                    f" No label file exists at {probe_path}"
+                    f"No target labels provided. No label file exists at {probe_path}"
                 )
             target_label = probe_path
 
@@ -63,7 +60,6 @@ class QEVDAdapter:
                 target_list = target_label_raw
         else:
             target_list = target_label
-
 
         self.target_label = target_list
 
@@ -134,8 +130,7 @@ class QEVDAdapter:
 
         if self.source_label_path is None:
             raise FileNotFoundError(
-                "No source label file provided."
-                "Automatic searching inside available parts failed"
+                "No source label file provided.Automatic searching inside available parts failed"
             )
 
         with open(self.source_label_path) as source_label_file:

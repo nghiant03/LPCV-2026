@@ -8,6 +8,8 @@ from loguru import logger
 
 from lpcv.datasets.info import SPLIT_DIRS, VIDEO_EXTENSIONS
 
+MIN_DIMENSION = 16
+MAX_ASPECT_RATIO = 10.0
 
 def is_compatible_with_dataset(data_dir: Path):
     if not data_dir.is_dir():
@@ -83,6 +85,35 @@ def check_video_integrity(src: Path) -> bool:
 
     remuxed = remux_video(src)
     return bool(remuxed is not None and probe_video(remuxed))
+
+
+
+
+def check_video_dimensions(
+    src: Path,
+    *,
+    min_dim: int = MIN_DIMENSION,
+    max_aspect_ratio: float = MAX_ASPECT_RATIO,
+) -> bool:
+    try:
+        with av.open(str(src)) as container:
+            stream = container.streams.video[0]
+            w = stream.codec_context.width
+            h = stream.codec_context.height
+    except Exception:
+        logger.debug(f"Failed to read dimensions for {src}")
+        return False
+
+    if w < min_dim or h < min_dim:
+        logger.debug(f"Dimensions too small ({w}x{h}): {src}")
+        return False
+
+    aspect = max(w, h) / max(min(w, h), 1)
+    if aspect > max_aspect_ratio:
+        logger.debug(f"Extreme aspect ratio {aspect:.1f} ({w}x{h}): {src}")
+        return False
+
+    return True
 
 
 def subsample(

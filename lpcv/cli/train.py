@@ -117,9 +117,7 @@ def videomae(
     )
 
     def run() -> None:
-        trainer = VideoMAEModelTrainer(
-            config=config, train_dataset=train_ds, eval_dataset=eval_ds
-        )
+        trainer = VideoMAEModelTrainer(config=config, train_dataset=train_ds, eval_dataset=eval_ds)
         trainer.train()
 
     if num_gpus > 1:

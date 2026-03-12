@@ -188,11 +188,10 @@ class QEVDAdapter:
 
         def _make_transform_fn(transform: Compose) -> Callable:
             def _apply(examples: dict) -> dict:
-                examples["pixel_values"] = [
-                    transform(video) for video in examples["video"]
-                ]
+                examples["pixel_values"] = [transform(video) for video in examples["video"]]
                 examples["labels"] = examples["label"]
                 return examples
+
             return _apply
 
         train_ds = ds["train"]

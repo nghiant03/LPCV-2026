@@ -11,6 +11,7 @@ from lpcv.datasets.info import SPLIT_DIRS, VIDEO_EXTENSIONS
 MIN_DIMENSION = 16
 MAX_ASPECT_RATIO = 10.0
 
+
 def is_compatible_with_dataset(data_dir: Path):
     if not data_dir.is_dir():
         return False
@@ -85,8 +86,6 @@ def check_video_integrity(src: Path) -> bool:
 
     remuxed = remux_video(src)
     return bool(remuxed is not None and probe_video(remuxed))
-
-
 
 
 def check_video_dimensions(

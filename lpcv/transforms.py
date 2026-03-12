@@ -51,9 +51,7 @@ class FromNumpy:
 class FromVideo:
     def __call__(self, source: Any) -> torch.Tensor:
         frames = list(source)
-        return torch.stack(
-            [torch.from_numpy(np.array(f)).permute(2, 0, 1) for f in frames]
-        ).float()
+        return torch.stack([torch.from_numpy(np.array(f)).permute(2, 0, 1) for f in frames]).float()
 
 
 # ---------------------------------------------------------------------------

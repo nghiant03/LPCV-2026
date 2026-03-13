@@ -50,6 +50,7 @@ class VideoMAETrainerConfig:
     resume_from_checkpoint: str | None = None
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = False
+    max_steps: int = -1
     freeze_strategy: str = DEFAULT_FREEZE_STRATEGY
     torch_compile: bool = False
     tf32: bool = False
@@ -182,6 +183,7 @@ class VideoMAEModelTrainer:
             remove_unused_columns=self.config.remove_unused_columns,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             gradient_checkpointing=self.config.gradient_checkpointing,
+            max_steps=self.config.max_steps,
             torch_compile=self.config.torch_compile,
             tf32=self.config.tf32,
             report_to="none",

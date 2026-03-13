@@ -69,6 +69,12 @@ def videomae(
         bool,
         typer.Option("--tf32", help="Enable TF32 for faster matmuls on Ampere+ GPUs."),
     ] = False,
+    max_steps: Annotated[
+        int,
+        typer.Option(
+            "--max-steps", help="Stop after N optimizer steps. Overrides --epochs when > 0."
+        ),
+    ] = -1,
     resume: Annotated[
         str | None,
         typer.Option("--resume", help="Path to checkpoint to resume training from."),
@@ -106,6 +112,7 @@ def videomae(
         freeze_strategy=freeze_strategy,
         torch_compile=torch_compile,
         tf32=tf32,
+        max_steps=max_steps,
         resume_from_checkpoint=resume,
     )
 

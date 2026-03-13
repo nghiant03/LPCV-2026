@@ -35,6 +35,7 @@ def build_transform(steps: list[dict[str, Any]]) -> Compose:
         transforms.append(get(name)(**step))
     return Compose(transforms)
 
+
 class VideoTransformCallable:
     def __init__(self, transform: Compose):
         self.transform = transform
@@ -43,6 +44,7 @@ class VideoTransformCallable:
         examples["pixel_values"] = [self.transform(video) for video in examples["video"]]
         examples["labels"] = examples["label"]
         return examples
+
 
 # ---------------------------------------------------------------------------
 # Format transforms
@@ -53,7 +55,10 @@ class VideoTransformCallable:
 class FromVideo:
     def __call__(self, source: Any) -> torch.Tensor:
         frames = list(source)
-        return torch.stack([torch.from_numpy(np.array(f)).permute(2, 0, 1) for f in frames]).float()
+        t = torch.stack([torch.from_numpy(np.array(f)) for f in frames]).float()
+        if t.ndim == 4 and t.shape[-1] in (1, 3, 4):
+            t = t.permute(0, 3, 1, 2)
+        return t
 
 
 # ---------------------------------------------------------------------------

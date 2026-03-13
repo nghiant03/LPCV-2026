@@ -41,15 +41,6 @@ def build_transform(steps: list[dict[str, Any]]) -> Compose:
 # ---------------------------------------------------------------------------
 
 
-@register("FromNumpy")
-class FromNumpy:
-    def __call__(self, source: Any) -> torch.Tensor:
-        t = torch.from_numpy(np.array(source)).float()
-        if t.ndim == 4:
-            t = t.permute(0, 3, 1, 2)  # (T, H, W, C) → (T, C, H, W)
-        return t
-
-
 @register("FromVideo")
 class FromVideo:
     def __call__(self, source: Any) -> torch.Tensor:

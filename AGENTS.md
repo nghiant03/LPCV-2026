@@ -40,7 +40,7 @@ uv run ruff check --fix .
 uv run pyright
 ```
 
-Do not consider a task complete until all three pass cleanly.
+Do not consider a task complete until all three pass cleanly. Update this file with any relevant information after a code change.
 
 ## Project Overview
 

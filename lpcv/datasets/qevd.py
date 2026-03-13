@@ -1,7 +1,6 @@
 import json
 import re
 import shutil
-from collections.abc import Callable
 from functools import cached_property
 from pathlib import Path
 
@@ -31,6 +30,7 @@ class QEVDLabel(BaseModel):
     labels: list[str]
     labels_descriptive: list[str]
     split: str
+
 
 class QEVDAdapter:
     def __init__(

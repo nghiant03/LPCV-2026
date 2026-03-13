@@ -123,11 +123,9 @@ def videomae(
     else:
         run_trainer(config, train_ds, eval_ds)
 
+
 def run_trainer(config, train_ds, eval_ds) -> None:
     from lpcv.models.videomae import VideoMAEModelTrainer
-    trainer = VideoMAEModelTrainer(
-        config=config,
-        train_dataset=train_ds,
-        eval_dataset=eval_ds
-    )
+
+    trainer = VideoMAEModelTrainer(config=config, train_dataset=train_ds, eval_dataset=eval_ds)
     trainer.train()

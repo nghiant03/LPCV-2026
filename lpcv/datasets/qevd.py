@@ -5,7 +5,7 @@ from collections.abc import Callable
 from functools import cached_property
 from pathlib import Path
 
-from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_dataset
 from loguru import logger
 from pydantic import BaseModel
 from torchvision.transforms import Compose
@@ -17,7 +17,6 @@ from lpcv.datasets.utils import (
     check_video_integrity,
     is_compatible_with_dataset,
 )
-from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
 
 FOLDER_PATTERN = "QEVD-FIT-300k-Part-"
 SOURCE_LABEL_FILE_NAME = "fine_grained_labels.json"
@@ -174,17 +173,12 @@ class QEVDAdapter:
 
     def load(
         self,
-        cache_dir: Path | None = None,
-        train_transform: Compose | None = None,
-        val_transform: Compose | None = None,
+        train_transform: Compose,
+        val_transform: Compose,
     ) -> tuple[Dataset, Dataset]:
-        ds = self.load_raw(cache_dir)
-
-        fmt_step = [{"name": "FromVideo"}]
-        if train_transform is None:
-            train_transform = build_transform(fmt_step + TRAIN_PRESET)
-        if val_transform is None:
-            val_transform = build_transform(fmt_step + VAL_PRESET)
+        ds = load_dataset("videofolder", data_dir=str(self.data_dir))
+        if isinstance(ds, DatasetDict) and QUARANTINE_DIR_NAME in ds:
+            ds.pop(QUARANTINE_DIR_NAME)
 
         def _make_transform_fn(transform: Compose) -> Callable:
             def _apply(examples: dict) -> dict:
@@ -204,24 +198,6 @@ class QEVDAdapter:
         val_ds.set_transform(_make_transform_fn(val_transform))
 
         return train_ds, val_ds
-
-    def load_raw(self, cache_dir: Path | None = None) -> DatasetDict:
-        if cache_dir is not None and cache_dir.is_dir():
-            logger.info(f"Loading cached dataset from {cache_dir}")
-            ds = load_from_disk(str(cache_dir))
-            if not isinstance(ds, DatasetDict):
-                raise TypeError(f"Expected DatasetDict, got {type(ds).__name__}")
-            return ds
-
-        ds = load_dataset("videofolder", data_dir=str(self.data_dir))
-        if isinstance(ds, DatasetDict) and QUARANTINE_DIR_NAME in ds:
-            ds.pop(QUARANTINE_DIR_NAME)
-
-        if cache_dir is not None:
-            logger.info(f"Saving dataset cache to {cache_dir}")
-            ds.save_to_disk(str(cache_dir), num_proc=self.num_workers)
-
-        return ds
 
     @staticmethod
     def _match_label(source_labels: list[str], target_label_set: set[str]) -> str:

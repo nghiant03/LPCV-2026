@@ -10,9 +10,7 @@ DEFAULT_NPROC = 1
 
 @app.command()
 def videomae(
-    data_dir: Annotated[
-        Path, typer.Argument(help="Path to QEVD dataset or cached/precomputed DatasetDict.")
-    ],
+    data_dir: Annotated[Path, typer.Argument(help="Path to QEVD dataset or cached DatasetDict.")],
     output_dir: Annotated[
         str,
         typer.Option("--output-dir", "-o", help="Directory to save model and checkpoints."),
@@ -71,12 +69,6 @@ def videomae(
         bool,
         typer.Option("--tf32", help="Enable TF32 for faster matmuls on Ampere+ GPUs."),
     ] = False,
-    is_cache: Annotated[
-        bool,
-        typer.Option(
-            "--is-cache", help="Treat data_dir as a saved DatasetDict (cached or precomputed)."
-        ),
-    ] = False,
     resume: Annotated[
         str | None,
         typer.Option("--resume", help="Path to checkpoint to resume training from."),
@@ -87,15 +79,16 @@ def videomae(
     ] = DEFAULT_NPROC,
 ) -> None:
     """Train a VideoMAE model on the QEVD dataset."""
-    from lpcv.datasets.precompute import PrecomputedDataset
     from lpcv.datasets.qevd import QEVDAdapter
     from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
+    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
 
-    if is_cache:
-        train_ds, eval_ds = PrecomputedDataset.load(data_dir)
-    else:
-        adapter = QEVDAdapter(data_dir=data_dir)
-        train_ds, eval_ds = adapter.load()
+    fmt_step = [{"name": "FromVideo"}]
+    train_transform = build_transform(fmt_step + TRAIN_PRESET)
+    val_transform = build_transform(fmt_step + VAL_PRESET)
+
+    adapter = QEVDAdapter(data_dir=data_dir)
+    train_ds, eval_ds = adapter.load(train_transform=train_transform, val_transform=val_transform)
 
     config = VideoMAETrainerConfig(
         model_name=model_name,

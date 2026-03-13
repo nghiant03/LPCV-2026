@@ -80,7 +80,7 @@ def videomae(
 ) -> None:
     """Train a VideoMAE model on the QEVD dataset."""
     from lpcv.datasets.qevd import QEVDAdapter
-    from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
+    from lpcv.models.videomae import VideoMAETrainerConfig
     from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
 
     fmt_step = [{"name": "FromVideo"}]
@@ -109,10 +109,6 @@ def videomae(
         resume_from_checkpoint=resume,
     )
 
-    def run() -> None:
-        trainer = VideoMAEModelTrainer(config=config, train_dataset=train_ds, eval_dataset=eval_ds)
-        trainer.train()
-
     if num_gpus > 1:
         from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 
@@ -123,6 +119,15 @@ def videomae(
             rdzv_backend="c10d",
             rdzv_endpoint="localhost:0",
         )
-        elastic_launch(launch_config, run)()
+        elastic_launch(launch_config, run_trainer)(config, train_ds, eval_ds)
     else:
-        run()
+        run_trainer(config, train_ds, eval_ds)
+
+def run_trainer(config, train_ds, eval_ds) -> None:
+    from lpcv.models.videomae import VideoMAEModelTrainer
+    trainer = VideoMAEModelTrainer(
+        config=config,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds
+    )
+    trainer.train()

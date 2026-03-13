@@ -17,6 +17,7 @@ from lpcv.datasets.utils import (
     check_video_integrity,
     is_compatible_with_dataset,
 )
+from lpcv.transforms import VideoTransformCallable
 
 FOLDER_PATTERN = "QEVD-FIT-300k-Part-"
 SOURCE_LABEL_FILE_NAME = "fine_grained_labels.json"
@@ -30,7 +31,6 @@ class QEVDLabel(BaseModel):
     labels: list[str]
     labels_descriptive: list[str]
     split: str
-
 
 class QEVDAdapter:
     def __init__(
@@ -180,22 +180,14 @@ class QEVDAdapter:
         if isinstance(ds, DatasetDict) and QUARANTINE_DIR_NAME in ds:
             ds.pop(QUARANTINE_DIR_NAME)
 
-        def _make_transform_fn(transform: Compose) -> Callable:
-            def _apply(examples: dict) -> dict:
-                examples["pixel_values"] = [transform(video) for video in examples["video"]]
-                examples["labels"] = examples["label"]
-                return examples
-
-            return _apply
-
         train_ds = ds["train"]
-        train_ds.set_transform(_make_transform_fn(train_transform))
+        train_ds.set_transform(VideoTransformCallable(train_transform))
 
         val_key = next((k for k in ("val", "validation", "test") if k in ds), None)
         if val_key is None:
             raise KeyError(f"No validation split found in {list(ds.keys())}")
         val_ds = ds[val_key]
-        val_ds.set_transform(_make_transform_fn(val_transform))
+        val_ds.set_transform(VideoTransformCallable(val_transform))
 
         return train_ds, val_ds
 

@@ -35,6 +35,14 @@ def build_transform(steps: list[dict[str, Any]]) -> Compose:
         transforms.append(get(name)(**step))
     return Compose(transforms)
 
+class VideoTransformCallable:
+    def __init__(self, transform: Compose):
+        self.transform = transform
+
+    def __call__(self, examples: dict) -> dict:
+        examples["pixel_values"] = [self.transform(video) for video in examples["video"]]
+        examples["labels"] = examples["label"]
+        return examples
 
 # ---------------------------------------------------------------------------
 # Format transforms

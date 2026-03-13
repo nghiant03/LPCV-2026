@@ -120,7 +120,7 @@ def videomae(
             min_nodes=1,
             max_nodes=1,
             nproc_per_node=num_gpus,
-            rdzv_backend="static",
+            rdzv_backend="c10d",
             rdzv_endpoint="localhost:0",
         )
         elastic_launch(launch_config, run)()

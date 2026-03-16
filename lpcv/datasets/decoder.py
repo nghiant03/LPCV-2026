@@ -141,7 +141,18 @@ class TorchCodecNVDECDecoder:
         self.num_gpus = num_gpus
 
     def _resolve_device(self) -> str:
-        """Return the CUDA device string for the current context."""
+        """Return the CUDA device string for the current context.
+
+        In distributed training the ``LOCAL_RANK`` environment variable takes
+        precedence so that each process decodes on its own GPU.  When
+        *num_gpus* is set without distributed training, DataLoader worker IDs
+        are used to round-robin across GPUs.
+        """
+        import os
+
+        local_rank = os.environ.get("LOCAL_RANK")
+        if local_rank is not None:
+            return f"cuda:{local_rank}"
         if self.num_gpus is None:
             return self.device
         info = torch.utils.data.get_worker_info()
@@ -168,13 +179,12 @@ class TorchCodecNVDECDecoder:
 
         from lpcv.datasets.utils import uniform_temporal_indices
 
+        device = self._resolve_device()
         with set_cuda_backend("beta"):
-            decoder = TVideoDecoder(
-                str(path), device=self._resolve_device(), dimension_order="NCHW"
-            )
-        total = decoder.metadata.num_frames or 1
-        indices = uniform_temporal_indices(total, num_frames)
-        return decoder.get_frames_at(indices).data.float()
+            decoder = TVideoDecoder(str(path), device=device, dimension_order="NCHW")
+            total = decoder.metadata.num_frames or 1
+            indices = uniform_temporal_indices(total, num_frames)
+            return decoder.get_frames_at(indices).data.float()
 
 
 DECODERS: dict[str, type[PyAVDecoder | TorchCodecCPUDecoder | TorchCodecNVDECDecoder]] = {

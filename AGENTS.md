@@ -42,6 +42,10 @@ uv run pyright
 
 Do not consider a task complete until all three pass cleanly. Update this file with any relevant information after a code change.
 
+## Documentation Style
+
+All source files use **NumPy-style docstrings** (compatible with `mkdocstrings-python`). Every public module, class, function, and constant has a docstring. Private methods with significant logic also have docstrings. When adding or modifying code, maintain this convention.
+
 ## Project Overview
 
 LPCVC 2026 Track 2: Video Classification with Dynamic Frame Selection. Built around fine-tuning **VideoMAE** models on the QEVD (exercise/fitness video) dataset using HuggingFace Transformers + Trainer API.
@@ -56,14 +60,15 @@ lpcv/
 ├── cli/
 │   ├── __init__.py
 │   ├── main.py            # Typer app root, mounts sub-commands
-│   ├── data.py            # CLI: convert, precompute, cache
+│   ├── data.py            # CLI: convert raw QEVD to videofolder
 │   ├── evaluate.py        # CLI: evaluate model or H5 logits
 │   └── train.py           # CLI: train videomae
 ├── datasets/
 │   ├── __init__.py
 │   ├── info.py            # Constants: video extensions, split dirs, label file name
-│   ├── precompute.py      # PrecomputedDataset: decode + resize + save frames to Arrow
-│   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder, load/cache
+│   ├── base.py            # VideoDataset (PyTorch Dataset) + load_video_dataset()
+│   ├── decoder.py         # VideoDecoder protocol + PyAV/TorchCodec implementations
+│   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder layout
 │   └── utils.py           # Video probing, remuxing, dimension checks, frame subsampling
 └── models/
     ├── __init__.py
@@ -80,32 +85,48 @@ lpcv/
 
 ### Dataset Pipeline (`lpcv/datasets/`)
 
-Two loading paths:
+Two-stage pipeline:
 
-1. **Raw video** → `QEVDAdapter.load()` → applies `FromVideo` + transforms on-the-fly via `set_transform`.
-2. **Precomputed** → `PrecomputedDataset.precompute()` saves decoded/resized frames as Arrow → `PrecomputedDataset.load()` applies `FromNumpy` + transforms via `set_transform`.
+1. **Convert** — `QEVDAdapter.convert()` discovers raw QEVD parts, validates video integrity/dimensions, matches labels via Pydantic-validated `QEVDLabel`, and reorganizes files into HuggingFace `videofolder` layout (`train/<class>/*.mp4`, `val/<class>/*.mp4`). Corrupt or bad-dimension videos are quarantined.
 
-`QEVDAdapter.convert()` reorganizes raw QEVD parts into HuggingFace `videofolder` layout (`train/<class>/*.mp4`, `val/<class>/*.mp4`), quarantining corrupt or bad-dimension videos.
+2. **Load** — `load_video_dataset()` in `base.py` builds train/val `VideoDataset` instances from the videofolder layout. Each `VideoDataset` is a standard PyTorch `Dataset` that delegates frame decoding to an injected `VideoDecoder` and applies transforms. Returns `{"pixel_values": Tensor, "labels": int}` dicts.
+
+### Decoder System (`lpcv/datasets/decoder.py`)
+
+- `VideoDecoder` protocol: `decode(path, num_frames) -> Tensor (T, C, H, W)`.
+- Three implementations: `PyAVDecoder` (full decode + subsample), `TorchCodecCPUDecoder` (seek-based CPU), `TorchCodecNVDECDecoder` (GPU/NVDEC).
+- `DECODERS` registry dict maps string names (`"pyav"`, `"torchcodec-cpu"`, `"torchcodec-nvdec"`) to classes.
+- `get_decoder(name, **kwargs)` factory function instantiates by name.
+- All decoders use `uniform_temporal_indices()` from `utils.py` for frame subsampling.
+- Note: `torchcodec` is an optional dependency not listed in `pyproject.toml`.
 
 ### Transform System (`lpcv/transforms.py`)
 
 - Registry pattern: `@register("Name")` adds callable classes to `_REGISTRY`.
 - `build_transform(steps)` constructs a `torchvision.transforms.Compose` from a list of `{"name": ..., **kwargs}` dicts.
+- `get(name)` retrieves a registered transform class by name.
 - All transforms operate on `torch.Tensor` with shape `(T, C, H, W)`.
-- Two presets: `TRAIN_PRESET` (with random augmentation) and `VAL_PRESET` (deterministic resize).
-- Format transforms (`FromNumpy`, `FromVideo`) convert raw data into the expected tensor shape.
+- `VideoTransformCallable` wraps a `Compose` pipeline for use with HF `set_transform`.
+- Four presets:
+  - `TRAIN_PRESET` — temporal subsample + scale + normalize + random augmentation (crop/flip/scale).
+  - `VAL_PRESET` — temporal subsample + scale + normalize + deterministic resize.
+  - `DECODE_TRAIN_PRESET` — same as `TRAIN_PRESET` but without temporal subsample (decoder handles it).
+  - `DECODE_VAL_PRESET` — same as `VAL_PRESET` but without temporal subsample.
+- Registered transforms: `FromVideo`, `UniformTemporalSubsample`, `ScalePixels`, `Normalize`, `RandomShortSideScale`, `ShortSideScale`, `RandomCrop`, `CenterCrop`, `RandomHorizontalFlip`, `Resize`.
 
 ### Model Training (`lpcv/models/videomae.py`)
 
-- `VideoMAETrainerConfig`: dataclass holding all training hyperparameters.
-- `VideoMAEModelTrainer`: wraps HuggingFace `Trainer`. Handles model loading, freeze strategies (`none`/`backbone`/`partial`), custom collation, and top-1/top-5 metric computation.
+- `VideoMAETrainerConfig`: dataclass holding all training hyperparameters (~30 fields).
+- `VideoMAEModelTrainer`: wraps HuggingFace `Trainer`. Handles model loading, freeze strategies (`none`/`backbone`/`partial`), custom collation via `_collate_fn()`, and top-1/top-5 metric computation via `_compute_metrics()`.
 - Label metadata is read from the dataset's `label` feature (ClassLabel).
 - Multi-GPU via `torch.distributed.launcher.api.elastic_launch` (configured in CLI).
 
 ### Evaluation (`lpcv/evaluation.py`)
 
 - `topk_accuracy()`: generic top-k accuracy on tensors.
-- `evaluate_h5()`: loads logits from HDF5 (`data/0/sample_N` keys), compares against a JSONL manifest + class map JSON.
+- `load_logits_h5()`: loads logits from HDF5 files.
+- `load_labels_from_manifest()`: reads ground-truth labels from JSONL manifest + class map JSON.
+- `evaluate_h5()`: end-to-end evaluation from H5 logit files.
 - `evaluate_model()`: end-to-end inference on a dataset using a saved model checkpoint.
 
 ## Coding Conventions
@@ -117,6 +138,7 @@ Two loading paths:
 - Use **pydantic** `BaseModel` for structured data validation (e.g., `QEVDLabel`).
 - Constants live in `lpcv/datasets/info.py`.
 - No relative imports; all imports are absolute from `lpcv.*`.
+- NumPy-style docstrings on all public APIs.
 
 ## Key Dependencies
 
@@ -132,3 +154,12 @@ Two loading paths:
 | pydantic      | Data validation                      |
 | h5py          | HDF5 logit file I/O                  |
 | accelerate    | Distributed training support         |
+| tqdm          | Progress bars                        |
+| pillow        | Image processing support             |
+| evaluate      | HuggingFace evaluation metrics       |
+
+### Optional
+
+| Package     | Purpose                                      |
+|-------------|----------------------------------------------|
+| torchcodec  | Alternative video decoding (CPU / NVDEC GPU) |

@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import torch
 from loguru import logger
 from torch.utils.data import Dataset
 
@@ -113,11 +112,7 @@ class VideoDataset(Dataset):
         path = self.video_paths[idx]
         label = self.labels[idx]
 
-        try:
-            video = self.decoder.decode(path, self.num_frames)
-        except Exception:
-            logger.warning(f"Failed to decode {path}, returning zeros")
-            video = torch.zeros(self.num_frames, 3, 224, 224)
+        video = self.decoder.decode(path, self.num_frames)
 
         if self.transform is not None:
             video = self.transform(video)

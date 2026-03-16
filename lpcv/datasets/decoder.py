@@ -105,9 +105,7 @@ class TorchCodecCPUDecoder:
         torch.Tensor
             Float tensor ``(num_frames, C, H, W)`` in ``[0, 255]``.
         """
-        from torchcodec.decoders import (
-            VideoDecoder as TVideoDecoder,  # type: ignore[reportMissingImports]
-        )
+        from torchcodec.decoders import VideoDecoder as TVideoDecoder
 
         from lpcv.datasets.utils import uniform_temporal_indices
 
@@ -123,14 +121,32 @@ class TorchCodecNVDECDecoder:
     Frames are decoded directly on the GPU as CUDA tensors, eliminating
     the CPU-to-GPU transfer.  Requires ``torchcodec`` with CUDA support.
 
+    When *num_gpus* is set, the decoder distributes work across multiple
+    GPUs by assigning each ``DataLoader`` worker to a GPU based on its
+    worker ID (``worker_id % num_gpus``).  Outside a worker the *device*
+    parameter is used as-is.
+
     Parameters
     ----------
     device
-        CUDA device string, e.g. ``"cuda"`` or ``"cuda:0"``.
+        CUDA device string, e.g. ``"cuda"`` or ``"cuda:0"``.  Ignored
+        when *num_gpus* is set and decoding runs inside a DataLoader worker.
+    num_gpus
+        Number of GPUs to distribute across.  When *None*, all decoding
+        happens on *device*.
     """
 
-    def __init__(self, device: str = "cuda") -> None:
+    def __init__(self, device: str = "cuda", num_gpus: int | None = None) -> None:
         self.device = device
+        self.num_gpus = num_gpus
+
+    def _resolve_device(self) -> str:
+        """Return the CUDA device string for the current context."""
+        if self.num_gpus is None:
+            return self.device
+        info = torch.utils.data.get_worker_info()
+        gpu_id = (info.id if info else 0) % self.num_gpus
+        return f"cuda:{gpu_id}"
 
     def decode(self, path: Path, num_frames: int) -> torch.Tensor:
         """Decode frames using NVDEC on GPU.
@@ -147,15 +163,15 @@ class TorchCodecNVDECDecoder:
         torch.Tensor
             Float CUDA tensor ``(num_frames, C, H, W)`` in ``[0, 255]``.
         """
-        from torchcodec.decoders import (
-            VideoDecoder as _VideoDecoder,  # type: ignore[reportMissingImports]
-        )
-        from torchcodec.decoders import set_cuda_backend  # type: ignore[reportMissingImports]
+        from torchcodec.decoders import VideoDecoder as TVideoDecoder
+        from torchcodec.decoders import set_cuda_backend
 
         from lpcv.datasets.utils import uniform_temporal_indices
 
         with set_cuda_backend("beta"):
-            decoder = _VideoDecoder(str(path), device=self.device, dimension_order="NCHW")
+            decoder = TVideoDecoder(
+                str(path), device=self._resolve_device(), dimension_order="NCHW"
+            )
         total = decoder.metadata.num_frames or 1
         indices = uniform_temporal_indices(total, num_frames)
         return decoder.get_frames_at(indices).data.float()
@@ -170,7 +186,7 @@ DECODERS: dict[str, type[PyAVDecoder | TorchCodecCPUDecoder | TorchCodecNVDECDec
 
 
 def get_decoder(
-    name: str, **kwargs: str
+    name: str, **kwargs: str | int | None
 ) -> PyAVDecoder | TorchCodecCPUDecoder | TorchCodecNVDECDecoder:
     """Instantiate a decoder by name.
 
@@ -193,4 +209,4 @@ def get_decoder(
     """
     if name not in DECODERS:
         raise ValueError(f"Unknown decoder '{name}'. Available: {sorted(DECODERS)}")
-    return DECODERS[name](**kwargs)
+    return DECODERS[name](**kwargs)  # type: ignore[arg-type]

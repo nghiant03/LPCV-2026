@@ -1,3 +1,14 @@
+"""QEVD dataset adapter — converts raw QEVD parts to videofolder format.
+
+The :class:`QEVDAdapter` handles:
+
+1. Discovering dataset parts (``QEVD-FIT-300k-Part-{1..4}``).
+2. Matching fine-grained source labels to a target label set.
+3. Validating video integrity and dimensions.
+4. Organising videos into ``train/<class>/`` and ``val/<class>/`` directories.
+5. Loading the converted dataset via HuggingFace ``load_dataset("videofolder")``.
+"""
+
 import json
 import re
 import shutil
@@ -19,13 +30,36 @@ from lpcv.datasets.utils import (
 from lpcv.transforms import VideoTransformCallable
 
 FOLDER_PATTERN = "QEVD-FIT-300k-Part-"
+"""Prefix used to discover raw dataset part directories."""
+
 SOURCE_LABEL_FILE_NAME = "fine_grained_labels.json"
+"""Default filename for the QEVD fine-grained annotation file."""
+
 QUARANTINE_DIR_NAME = "quarantine"
+"""Directory name for videos that fail integrity or dimension checks."""
+
 SPLIT_MAP = {"test": "val"}
+"""Maps source split names to the names used in the videofolder layout."""
+
 CHUNK_SIZE = 10000
+"""Chunk size passed to ``process_map`` for parallel conversion."""
 
 
 class QEVDLabel(BaseModel):
+    """Schema for a single entry in the QEVD fine-grained label file.
+
+    Attributes
+    ----------
+    video_path
+        Relative path to the video file inside a dataset part.
+    labels
+        List of exercise labels (coarse).
+    labels_descriptive
+        Descriptive / fine-grained label strings.
+    split
+        Original split name (``"train"`` or ``"test"``).
+    """
+
     video_path: str
     labels: list[str]
     labels_descriptive: list[str]
@@ -33,6 +67,24 @@ class QEVDLabel(BaseModel):
 
 
 class QEVDAdapter:
+    """Adapter that converts raw QEVD data into a HuggingFace videofolder layout.
+
+    Parameters
+    ----------
+    data_dir
+        Root directory that contains the raw QEVD parts.
+    target_label
+        Either a ``Path`` to a JSON list of target class names, or the list
+        directly.  If ``None``, the adapter looks for
+        ``<data_dir>/class_labels.json``.
+    source_label_path
+        Path to ``fine_grained_labels.json``.  Auto-discovered from parts
+        if not provided.
+    num_workers
+        Number of parallel workers for ``process_map``.  ``None`` uses the
+        ``tqdm`` default.
+    """
+
     def __init__(
         self,
         data_dir: Path | str,
@@ -71,13 +123,16 @@ class QEVDAdapter:
 
     @cached_property
     def available_parts(self) -> list[Path]:
+        """Discovered dataset part directories (cached on first access)."""
         return self._discover_parts()
 
     @property
     def compatible(self) -> bool:
+        """Whether ``data_dir`` already has a valid videofolder structure."""
         return is_compatible_with_dataset(self.data_dir)
 
     def _discover_parts(self) -> list[Path]:
+        """Scan for ``QEVD-FIT-300k-Part-{1..4}`` directories."""
         logger.debug("Finding available parts from QEVD dataset.")
         part_paths = []
         for i in range(1, 5):
@@ -97,6 +152,7 @@ class QEVDAdapter:
         data_dir: Path,
         quarantine_dir: Path,
     ) -> None:
+        """Process a single label entry: validate, match, and move the video."""
         target_class = QEVDAdapter._match_label(entry.labels, target_label_set)
         split_name = SPLIT_MAP.get(entry.split, entry.split)
         src_filename = Path(entry.video_path).name
@@ -129,6 +185,18 @@ class QEVDAdapter:
         shutil.move(src_path, dst_path)
 
     def convert(self):
+        """Run the full conversion pipeline.
+
+        1. Locate the source label file.
+        2. Create split/class directories.
+        3. Process all entries in parallel (validate, match, move).
+        4. Move the source label file into ``data_dir``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the source label file cannot be found.
+        """
         if self.source_label_path is None:
             for part_path in self.available_parts:
                 candidate_path = part_path / SOURCE_LABEL_FILE_NAME
@@ -176,6 +244,25 @@ class QEVDAdapter:
         train_transform: Compose,
         val_transform: Compose,
     ) -> tuple[Dataset, Dataset]:
+        """Load the converted dataset with on-the-fly transforms.
+
+        Parameters
+        ----------
+        train_transform
+            Transform pipeline for the training split.
+        val_transform
+            Transform pipeline for the validation split.
+
+        Returns
+        -------
+        tuple[Dataset, Dataset]
+            ``(train_dataset, val_dataset)``.
+
+        Raises
+        ------
+        KeyError
+            If no validation split is found.
+        """
         ds = load_dataset("videofolder", data_dir=str(self.data_dir))
         if isinstance(ds, DatasetDict) and QUARANTINE_DIR_NAME in ds:
             ds.pop(QUARANTINE_DIR_NAME)
@@ -193,6 +280,23 @@ class QEVDAdapter:
 
     @staticmethod
     def _match_label(source_labels: list[str], target_label_set: set[str]) -> str:
+        """Match a list of source labels against the target label set.
+
+        Tries exact match first, then strips trailing parenthetical text.
+        Returns ``"background"`` if no match is found.
+
+        Parameters
+        ----------
+        source_labels
+            Labels from the source annotation (fine-grained).
+        target_label_set
+            Set of accepted target class names.
+
+        Returns
+        -------
+        str
+            Matched target label or ``"background"``.
+        """
         for source_label in source_labels:
             exercise = source_label.split(" - ", 1)[0]
             if exercise in target_label_set:

@@ -1,3 +1,10 @@
+"""VideoMAE model trainer — config and HuggingFace Trainer wrapper.
+
+Provides :class:`VideoMAETrainerConfig` (training hyperparameters) and
+:class:`VideoMAEModelTrainer` (handles model loading, freeze strategies,
+custom collation, metrics, and checkpoint saving).
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -26,6 +33,74 @@ DEFAULT_FREEZE_STRATEGY = "none"
 
 @dataclass
 class VideoMAETrainerConfig:
+    """All hyperparameters for a VideoMAE training run.
+
+    Attributes
+    ----------
+    model_name
+        HuggingFace model identifier or local path.
+    num_frames
+        Number of frames sampled per video.
+    image_size
+        Spatial resolution (height = width) after preprocessing.
+    output_dir
+        Directory for checkpoints and the final saved model.
+    num_train_epochs
+        Total training epochs.
+    per_device_train_batch_size
+        Batch size per GPU during training.
+    per_device_eval_batch_size
+        Batch size per GPU during evaluation.
+    learning_rate
+        Peak learning rate for the optimiser.
+    warmup_ratio
+        Fraction of total steps used for linear warmup.
+    weight_decay
+        L2 regularisation coefficient.
+    logging_steps
+        Log metrics every N optimiser steps.
+    eval_strategy
+        When to evaluate: ``"epoch"``, ``"steps"``, or ``"no"``.
+    save_strategy
+        When to save checkpoints: ``"epoch"``, ``"steps"``, or ``"no"``.
+    save_total_limit
+        Maximum number of checkpoints to keep on disk.
+    load_best_model_at_end
+        Whether to reload the best checkpoint after training.
+    metric_for_best_model
+        Metric name used for best-model selection.
+    fp16
+        Enable FP16 mixed precision.
+    bf16
+        Enable BF16 mixed precision.
+    dataloader_num_workers
+        Number of data-loading worker processes.
+    dataloader_pin_memory
+        Pin memory for faster host-to-device transfer.
+    dataloader_persistent_workers
+        Keep workers alive between epochs.
+    dataloader_prefetch_factor
+        Number of batches to prefetch per worker.
+    remove_unused_columns
+        Whether the Trainer should drop columns not used by the model.
+    resume_from_checkpoint
+        Path to a checkpoint directory to resume from.
+    gradient_accumulation_steps
+        Number of forward passes before an optimiser step.
+    gradient_checkpointing
+        Trade compute for memory by recomputing activations.
+    max_steps
+        Stop after N optimiser steps (overrides *num_train_epochs* when > 0).
+    freeze_strategy
+        Parameter freeze strategy: ``"none"``, ``"backbone"``, or ``"partial"``.
+    torch_compile
+        Use ``torch.compile`` for fused kernels.
+    tf32
+        Enable TF32 math on Ampere+ GPUs.
+    extra_args
+        Additional keyword arguments forwarded to ``TrainingArguments``.
+    """
+
     model_name: str = DEFAULT_MODEL_NAME
     num_frames: int = DEFAULT_NUM_FRAMES
     image_size: int = DEFAULT_IMAGE_SIZE
@@ -46,6 +121,8 @@ class VideoMAETrainerConfig:
     bf16: bool = False
     dataloader_num_workers: int = 4
     dataloader_pin_memory: bool = True
+    dataloader_persistent_workers: bool = False
+    dataloader_prefetch_factor: int | None = None
     remove_unused_columns: bool = False
     resume_from_checkpoint: str | None = None
     gradient_accumulation_steps: int = 1
@@ -58,6 +135,28 @@ class VideoMAETrainerConfig:
 
 
 class VideoMAEModelTrainer:
+    """High-level wrapper around HuggingFace ``Trainer`` for VideoMAE fine-tuning.
+
+    Handles model initialisation, parameter freezing, custom collation,
+    metric computation, and saving.
+
+    Parameters
+    ----------
+    config
+        A :class:`VideoMAETrainerConfig` with all hyperparameters.
+    train_dataset
+        Training dataset.  Must expose a ``features`` attribute with a
+        ``"label"`` key that has a ``names`` list (HuggingFace ``ClassLabel``
+        or the :class:`~lpcv.datasets.base.DatasetFeatures` shim).
+    eval_dataset
+        Evaluation dataset with the same schema.
+
+    Raises
+    ------
+    ValueError
+        If the dataset does not have a ``"label"`` feature.
+    """
+
     def __init__(
         self,
         config: VideoMAETrainerConfig,
@@ -107,6 +206,18 @@ class VideoMAEModelTrainer:
         torch.backends.cudnn.benchmark = True
 
     def _apply_freeze_strategy(self, strategy: str) -> None:
+        """Freeze model parameters according to *strategy*.
+
+        Parameters
+        ----------
+        strategy
+            One of:
+
+            - ``"none"`` — all parameters trainable.
+            - ``"backbone"`` — freeze everything except the classifier head.
+            - ``"partial"`` — freeze all except the last 2 encoder layers and
+              the classifier head.
+        """
         if strategy == "none":
             return
 
@@ -142,6 +253,18 @@ class VideoMAEModelTrainer:
             logger.warning(f"Unknown freeze strategy '{strategy}', skipping")
 
     def _compute_metrics(self, eval_pred: EvalPrediction) -> dict[str, float]:
+        """Compute top-1 and top-5 accuracy from evaluation predictions.
+
+        Parameters
+        ----------
+        eval_pred
+            Predictions and label ids from the Trainer.
+
+        Returns
+        -------
+        dict[str, float]
+            ``{"accuracy": <top1>, "top5_accuracy": <top5>}`` as percentages.
+        """
         logits = eval_pred.predictions
         labels = eval_pred.label_ids
         logits_t = torch.as_tensor(logits)
@@ -157,11 +280,30 @@ class VideoMAEModelTrainer:
         return {"accuracy": acc1, "top5_accuracy": acc5}
 
     def _collate_fn(self, examples: list[dict]) -> dict[str, torch.Tensor]:
+        """Collate a list of sample dicts into a batched dict.
+
+        Parameters
+        ----------
+        examples
+            List of dicts with ``"pixel_values"`` and ``"labels"`` keys.
+
+        Returns
+        -------
+        dict[str, torch.Tensor]
+            Batched ``pixel_values`` and ``labels`` tensors.
+        """
         pixel_values = torch.stack([ex["pixel_values"] for ex in examples])
         labels = torch.tensor([ex["labels"] for ex in examples], dtype=torch.long)
         return {"pixel_values": pixel_values, "labels": labels}
 
     def train(self) -> Path:
+        """Run the full training loop and save the best model.
+
+        Returns
+        -------
+        Path
+            Path to the saved ``best_model`` directory.
+        """
         training_args = TrainingArguments(
             output_dir=self.config.output_dir,
             num_train_epochs=self.config.num_train_epochs,
@@ -180,6 +322,8 @@ class VideoMAEModelTrainer:
             bf16=self.config.bf16,
             dataloader_num_workers=self.config.dataloader_num_workers,
             dataloader_pin_memory=self.config.dataloader_pin_memory,
+            dataloader_persistent_workers=self.config.dataloader_persistent_workers,
+            dataloader_prefetch_factor=self.config.dataloader_prefetch_factor,
             remove_unused_columns=self.config.remove_unused_columns,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             gradient_checkpointing=self.config.gradient_checkpointing,

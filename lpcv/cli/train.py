@@ -1,3 +1,5 @@
+"""CLI sub-commands for model training."""
+
 from pathlib import Path
 from typing import Annotated
 
@@ -79,22 +81,37 @@ def videomae(
         str | None,
         typer.Option("--resume", help="Path to checkpoint to resume training from."),
     ] = None,
+    decoder: Annotated[
+        str,
+        typer.Option(
+            "--decoder",
+            help="Video decoder backend: 'pyav', 'torchcodec-cpu', or 'torchcodec-nvdec'.",
+        ),
+    ] = "pyav",
     num_gpus: Annotated[
         int,
         typer.Option("--num-gpus", "-g", help="Number of GPUs for distributed training."),
     ] = DEFAULT_NPROC,
 ) -> None:
     """Train a VideoMAE model on the QEVD dataset."""
-    from lpcv.datasets.qevd import QEVDAdapter
+    from lpcv.datasets.base import load_video_dataset
+    from lpcv.datasets.decoder import get_decoder
     from lpcv.models.videomae import VideoMAETrainerConfig
-    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
+    from lpcv.transforms import DECODE_TRAIN_PRESET, DECODE_VAL_PRESET, build_transform
 
-    fmt_step = [{"name": "FromVideo"}]
-    train_transform = build_transform(fmt_step + TRAIN_PRESET)
-    val_transform = build_transform(fmt_step + VAL_PRESET)
+    video_decoder = get_decoder(decoder)
+    train_transform = build_transform(DECODE_TRAIN_PRESET)
+    val_transform = build_transform(DECODE_VAL_PRESET)
+    train_ds, eval_ds = load_video_dataset(
+        data_dir=data_dir,
+        decoder=video_decoder,
+        train_transform=train_transform,
+        val_transform=val_transform,
+        num_frames=num_frames,
+    )
 
-    adapter = QEVDAdapter(data_dir=data_dir)
-    train_ds, eval_ds = adapter.load(train_transform=train_transform, val_transform=val_transform)
+    if decoder == "torchcodec-nvdec":
+        num_workers = 0
 
     config = VideoMAETrainerConfig(
         model_name=model_name,
@@ -132,6 +149,7 @@ def videomae(
 
 
 def run_trainer(config, train_ds, eval_ds) -> None:
+    """Instantiate and run the VideoMAE trainer (called directly or via elastic_launch)."""
     from lpcv.models.videomae import VideoMAEModelTrainer
 
     trainer = VideoMAEModelTrainer(config=config, train_dataset=train_ds, eval_dataset=eval_ds)

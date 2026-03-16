@@ -1,3 +1,5 @@
+"""CLI entry point — mounts sub-command groups for data, training and evaluation."""
+
 import typer
 
 from lpcv.cli.data import app as data_app

@@ -1,3 +1,5 @@
+"""CLI sub-commands for dataset operations (convert, etc.)."""
+
 from pathlib import Path
 from typing import Annotated
 

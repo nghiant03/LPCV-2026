@@ -1,3 +1,12 @@
+"""Video utility functions for probing, remuxing, validation and subsampling.
+
+Provides helpers used by the dataset conversion and loading pipelines:
+
+- Video integrity checks (probe, remux on failure).
+- Dimension validation (minimum size, aspect ratio).
+- Frame index computation for temporal subsampling.
+"""
+
 import shutil
 from pathlib import Path
 
@@ -9,10 +18,28 @@ from loguru import logger
 from lpcv.datasets.info import SPLIT_DIRS, VIDEO_EXTENSIONS
 
 MIN_DIMENSION = 16
+"""Minimum acceptable width or height in pixels."""
+
 MAX_ASPECT_RATIO = 10.0
+"""Maximum acceptable aspect ratio (``max(w, h) / min(w, h)``)."""
 
 
 def is_compatible_with_dataset(data_dir: Path):
+    """Check whether *data_dir* looks like a valid videofolder dataset.
+
+    A valid layout has at least one split directory (``train`` / ``val``)
+    containing class sub-directories with video files.
+
+    Parameters
+    ----------
+    data_dir
+        Root directory to check.
+
+    Returns
+    -------
+    bool
+        ``True`` if the directory matches the expected videofolder structure.
+    """
     if not data_dir.is_dir():
         return False
 
@@ -36,6 +63,18 @@ def is_compatible_with_dataset(data_dir: Path):
 
 
 def probe_video(path: Path) -> bool:
+    """Try to open and decode one keyframe from *path*.
+
+    Parameters
+    ----------
+    path
+        Path to the video file.
+
+    Returns
+    -------
+    bool
+        ``True`` if at least one frame can be decoded.
+    """
     try:
         with av.open(str(path)) as container:
             video_streams = container.streams.video
@@ -52,6 +91,21 @@ def probe_video(path: Path) -> bool:
 
 
 def remux_video(src: Path) -> Path | None:
+    """Re-mux *src* in-place to fix container-level corruption.
+
+    The video stream is copied without re-encoding.  If remuxing fails the
+    temporary file is cleaned up and ``None`` is returned.
+
+    Parameters
+    ----------
+    src
+        Path to the source video file.
+
+    Returns
+    -------
+    Path | None
+        *src* on success, ``None`` on failure.
+    """
     remuxed_path = src.with_suffix(".remux" + src.suffix)
     try:
         with av.open(str(src)) as input_container:
@@ -81,6 +135,18 @@ def remux_video(src: Path) -> Path | None:
 
 
 def check_video_integrity(src: Path) -> bool:
+    """Verify that *src* can be decoded, attempting a remux if the first probe fails.
+
+    Parameters
+    ----------
+    src
+        Path to the video file.
+
+    Returns
+    -------
+    bool
+        ``True`` if the video is decodable (possibly after remuxing).
+    """
     if probe_video(src):
         return True
 
@@ -94,6 +160,22 @@ def check_video_dimensions(
     min_dim: int = MIN_DIMENSION,
     max_aspect_ratio: float = MAX_ASPECT_RATIO,
 ) -> bool:
+    """Validate that *src* has reasonable spatial dimensions.
+
+    Parameters
+    ----------
+    src
+        Path to the video file.
+    min_dim
+        Minimum acceptable width **or** height in pixels.
+    max_aspect_ratio
+        Maximum acceptable ratio of the longer side to the shorter side.
+
+    Returns
+    -------
+    bool
+        ``True`` if dimensions pass all checks.
+    """
     try:
         with av.open(str(src)) as container:
             stream = container.streams.video[0]
@@ -115,6 +197,26 @@ def check_video_dimensions(
     return True
 
 
+def uniform_temporal_indices(total: int, num_frames: int) -> list[int]:
+    """Return *num_frames* uniformly-spaced indices in ``[0, total)``.
+
+    Parameters
+    ----------
+    total
+        Total number of available frames.
+    num_frames
+        Number of indices to return.
+
+    Returns
+    -------
+    list[int]
+        Sorted list of frame indices.
+    """
+    import torch
+
+    return torch.linspace(0, total - 1, num_frames).long().tolist()
+
+
 def subsample(
     frames: list,
     num_frames: int = 16,
@@ -122,6 +224,30 @@ def subsample(
     mode: str = "dense",
     stride: int = 4,
 ) -> list:
+    """Subsample a list of frames to exactly *num_frames*.
+
+    Parameters
+    ----------
+    frames
+        Input frame list (PIL images, numpy arrays, etc.).
+    num_frames
+        Desired output length.
+    mode
+        Sampling strategy:
+
+        - ``"dense"`` — pick a random contiguous window of size
+          ``num_frames * stride`` and take every *stride*-th frame.  Falls
+          back to uniform when the video is shorter than the window.
+        - ``"uniform"`` — evenly-spaced indices across the full video.  Pads
+          with the last frame if the video is shorter than *num_frames*.
+    stride
+        Step size for ``"dense"`` sampling.
+
+    Returns
+    -------
+    list
+        Subsampled frames of length *num_frames* (or empty if input is empty).
+    """
     total = len(frames)
     if total == 0:
         return []
@@ -132,11 +258,9 @@ def subsample(
             start = int(np.random.randint(0, total - window_size + 1))
             indices = list(range(start, start + window_size, stride))
             return [frames[i] for i in indices]
-        # fallback to uniform when video is too short
         indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
         return [frames[i] for i in indices]
 
-    # uniform mode
     if total >= num_frames:
         indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
         return [frames[i] for i in indices]

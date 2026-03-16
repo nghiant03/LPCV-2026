@@ -1,3 +1,5 @@
+"""CLI sub-commands for model evaluation."""
+
 from pathlib import Path
 from typing import Annotated
 

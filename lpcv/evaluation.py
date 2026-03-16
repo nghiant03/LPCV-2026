@@ -1,3 +1,12 @@
+"""Evaluation utilities — top-k accuracy, H5 logit evaluation, model evaluation.
+
+Provides:
+
+- :func:`topk_accuracy` — generic top-k accuracy on tensors.
+- :func:`evaluate_h5` — evaluate precomputed logits in HDF5 format.
+- :func:`evaluate_model` — end-to-end inference + evaluation on a dataset.
+"""
+
 from __future__ import annotations
 
 import json
@@ -18,6 +27,22 @@ def topk_accuracy(
     targets: torch.Tensor,
     topk: tuple[int, ...] = (1, 5),
 ) -> list[torch.Tensor]:
+    """Compute top-k classification accuracy.
+
+    Parameters
+    ----------
+    preds
+        Logits or probabilities of shape ``(N, C)``.
+    targets
+        Ground-truth class indices of shape ``(N,)``.
+    topk
+        Tuple of k values to compute accuracy for.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        List of scalar tensors, one per k, as percentages (0–100).
+    """
     maxk = max(topk)
     _, pred = preds.topk(maxk, dim=1, largest=True, sorted=True)
     pred = pred.t()
@@ -26,6 +51,21 @@ def topk_accuracy(
 
 
 def load_logits_h5(h5_path: str | Path) -> np.ndarray:
+    """Load logits from an HDF5 file.
+
+    Expects logits under the ``data/0/`` group with keys ``sample_0``,
+    ``sample_1``, etc.
+
+    Parameters
+    ----------
+    h5_path
+        Path to the HDF5 file.
+
+    Returns
+    -------
+    np.ndarray
+        Stacked logit array of shape ``(N, C)``.
+    """
     import h5py
 
     h5_path = str(h5_path)
@@ -45,6 +85,28 @@ def load_labels_from_manifest(
     manifest_path: str | Path,
     class_to_idx: dict[str, int],
 ) -> list[int]:
+    """Load ground-truth labels from a JSONL manifest.
+
+    Each line must be a JSON object with at least a ``"label"`` field whose
+    value matches a key in *class_to_idx*.
+
+    Parameters
+    ----------
+    manifest_path
+        Path to the JSONL manifest file.
+    class_to_idx
+        Mapping from class name to integer index.
+
+    Returns
+    -------
+    list[int]
+        Integer labels in manifest order.
+
+    Raises
+    ------
+    KeyError
+        If a label in the manifest is not found in *class_to_idx*.
+    """
     labels: list[int] = []
     with open(manifest_path, encoding="utf-8") as f:
         for line in f:
@@ -64,6 +126,30 @@ def evaluate_h5(
     class_map_path: str | Path,
     verbose: bool = False,
 ) -> dict[str, float]:
+    """Evaluate precomputed logits in HDF5 format against a manifest.
+
+    Parameters
+    ----------
+    h5_path
+        Path to the HDF5 logits file.
+    manifest_path
+        Path to the JSONL manifest with ground-truth labels.
+    class_map_path
+        Path to a JSON file mapping class names to integer indices.
+    verbose
+        If ``True``, log the first 10 predictions with match markers.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{"top1_accuracy": <float>, "top5_accuracy": <float>}`` as
+        percentages.
+
+    Raises
+    ------
+    ValueError
+        If the H5 file has more results than the manifest has labels.
+    """
     with open(class_map_path, encoding="utf-8") as f:
         class_to_idx: dict[str, int] = json.load(f)
     idx_to_class = {i: cls for cls, i in class_to_idx.items()}
@@ -109,6 +195,40 @@ def evaluate_model(
     num_workers: int = 4,
     augmentation: Callable[[list[Image.Image]], list[Image.Image]] | None = None,
 ) -> dict[str, float]:
+    """Run end-to-end inference on a dataset and compute accuracy.
+
+    Loads a saved ``VideoMAEForVideoClassification`` checkpoint, preprocesses
+    the evaluation split, runs batched forward passes, and returns top-1 /
+    top-5 accuracy.
+
+    Parameters
+    ----------
+    model_path
+        Path to the saved model directory (contains config + weights).
+    data_dir
+        Root directory of the QEVD dataset (videofolder or saved DatasetDict).
+    num_frames
+        Number of frames to sample per video.
+    batch_size
+        Inference batch size.
+    num_workers
+        Dataloader workers (unused currently — batching is manual).
+    augmentation
+        Optional callable applied to sampled PIL frames before the
+        processor.  Receives and returns a list of PIL images.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{"top1_accuracy": <float>, "top5_accuracy": <float>}`` as
+        percentages.
+
+    Raises
+    ------
+    ValueError
+        If the loaded dataset is not a ``DatasetDict`` or has no evaluation
+        split.
+    """
     from datasets import DatasetDict, load_dataset, load_from_disk
     from transformers import (
         VideoMAEForVideoClassification,

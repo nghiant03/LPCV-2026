@@ -4,10 +4,9 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
 
 app = typer.Typer(help="Model training operations.")
-
-DEFAULT_NPROC = 1
 
 
 @app.command()
@@ -87,11 +86,11 @@ def videomae(
             "--decoder",
             help="Video decoder backend: 'pyav', 'torchcodec-cpu', or 'torchcodec-nvdec'.",
         ),
-    ] = "pyav",
+    ] = "torchcodec-nvdec",
     num_gpus: Annotated[
         int,
         typer.Option("--num-gpus", "-g", help="Number of GPUs for distributed training."),
-    ] = DEFAULT_NPROC,
+    ] = 1,
 ) -> None:
     """Train a VideoMAE model on the QEVD dataset."""
     from lpcv.datasets.base import load_video_dataset
@@ -110,8 +109,12 @@ def videomae(
         num_frames=num_frames,
     )
 
+    pin_memory = True
     if decoder == "torchcodec-nvdec":
-        num_workers = 0
+        pin_memory = False
+        if num_workers > 0:
+            logger.warning(f"Using Torchcodec NVDEC, number of workers set to 0 from {num_workers}")
+            num_workers = 0
 
     config = VideoMAETrainerConfig(
         model_name=model_name,
@@ -122,6 +125,7 @@ def videomae(
         per_device_eval_batch_size=batch_size,
         learning_rate=learning_rate,
         dataloader_num_workers=num_workers,
+        dataloader_pin_memory=pin_memory,
         fp16=fp16,
         bf16=bf16,
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -149,7 +153,7 @@ def videomae(
 
 
 def run_trainer(config, train_ds, eval_ds) -> None:
-    """Instantiate and run the VideoMAE trainer (called directly or via elastic_launch)."""
+    """Instantiate and run the VideoMAE trainer."""
     from lpcv.models.videomae import VideoMAEModelTrainer
 
     trainer = VideoMAEModelTrainer(config=config, train_dataset=train_ds, eval_dataset=eval_ds)

@@ -17,12 +17,6 @@ from loguru import logger
 
 from lpcv.datasets.info import SPLIT_DIRS, VIDEO_EXTENSIONS
 
-MIN_DIMENSION = 16
-"""Minimum acceptable width or height in pixels."""
-
-MAX_ASPECT_RATIO = 10.0
-"""Maximum acceptable aspect ratio (``max(w, h) / min(w, h)``)."""
-
 
 def is_compatible_with_dataset(data_dir: Path):
     """Check whether *data_dir* looks like a valid videofolder dataset.
@@ -157,8 +151,8 @@ def check_video_integrity(src: Path) -> bool:
 def check_video_dimensions(
     src: Path,
     *,
-    min_dim: int = MIN_DIMENSION,
-    max_aspect_ratio: float = MAX_ASPECT_RATIO,
+    min_dim: int = 16,
+    max_aspect_ratio: float = 10.0,
 ) -> bool:
     """Validate that *src* has reasonable spatial dimensions.
 

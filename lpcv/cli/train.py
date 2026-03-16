@@ -98,7 +98,15 @@ def videomae(
     from lpcv.models.videomae import VideoMAETrainerConfig
     from lpcv.transforms import DECODE_TRAIN_PRESET, DECODE_VAL_PRESET, build_transform
 
-    video_decoder = get_decoder(decoder)
+    pin_memory = True
+    decoder_kwargs: dict[str, str | int | None] = {}
+    if decoder == "torchcodec-nvdec":
+        pin_memory = False
+        if num_gpus > 1:
+            decoder_kwargs["num_gpus"] = num_gpus
+            logger.info(f"NVDEC multi-GPU enabled: distributing decoding across {num_gpus} GPUs")
+
+    video_decoder = get_decoder(decoder, **decoder_kwargs)
     train_transform = build_transform(DECODE_TRAIN_PRESET)
     val_transform = build_transform(DECODE_VAL_PRESET)
     train_ds, eval_ds = load_video_dataset(
@@ -108,13 +116,6 @@ def videomae(
         val_transform=val_transform,
         num_frames=num_frames,
     )
-
-    pin_memory = True
-    if decoder == "torchcodec-nvdec":
-        pin_memory = False
-        if num_workers > 0:
-            logger.warning(f"Using Torchcodec NVDEC, number of workers set to 0 from {num_workers}")
-            num_workers = 0
 
     config = VideoMAETrainerConfig(
         model_name=model_name,

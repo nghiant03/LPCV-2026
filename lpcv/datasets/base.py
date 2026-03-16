@@ -104,11 +104,7 @@ class VideoDataset(Dataset):
         return len(self.video_paths)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        """Return the *idx*-th sample.
-
-        If decoding fails a zero tensor is returned so that training can
-        continue without crashing on individual corrupt files.
-        """
+        """Return the *idx*-th sample."""
         path = self.video_paths[idx]
         label = self.labels[idx]
 

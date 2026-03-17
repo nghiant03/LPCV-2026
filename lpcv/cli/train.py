@@ -62,6 +62,14 @@ def videomae(
         str,
         typer.Option("--freeze", help="Freeze strategy: 'none', 'backbone', or 'partial'."),
     ] = "none",
+    lr_scheduler_type: Annotated[
+        str,
+        typer.Option(
+            "--lr-scheduler",
+            help="LR scheduler: 'linear', 'cosine', 'cosine_with_restarts', 'polynomial',"
+            " 'constant', 'constant_with_warmup', or 'inverse_sqrt'.",
+        ),
+    ] = "linear",
     torch_compile: Annotated[
         bool,
         typer.Option("--compile", help="Use torch.compile for faster training."),
@@ -132,6 +140,7 @@ def videomae(
         gradient_accumulation_steps=gradient_accumulation_steps,
         gradient_checkpointing=gradient_checkpointing,
         freeze_strategy=freeze_strategy,
+        lr_scheduler_type=lr_scheduler_type,
         torch_compile=torch_compile,
         tf32=tf32,
         max_steps=max_steps,

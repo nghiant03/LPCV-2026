@@ -88,6 +88,10 @@ class VideoMAETrainerConfig:
         Stop after N optimiser steps (overrides *num_train_epochs* when > 0).
     freeze_strategy
         Parameter freeze strategy: ``"none"``, ``"backbone"``, or ``"partial"``.
+    lr_scheduler_type
+        Learning rate scheduler: ``"linear"``, ``"cosine"``,
+        ``"cosine_with_restarts"``, ``"polynomial"``, ``"constant"``,
+        ``"constant_with_warmup"``, or ``"inverse_sqrt"``.
     torch_compile
         Use ``torch.compile`` for fused kernels.
     tf32
@@ -124,6 +128,7 @@ class VideoMAETrainerConfig:
     gradient_checkpointing: bool = False
     max_steps: int = -1
     freeze_strategy: str = "none"
+    lr_scheduler_type: str = "linear"
     torch_compile: bool = False
     tf32: bool = False
     extra_args: dict[str, Any] = field(default_factory=dict)
@@ -323,6 +328,7 @@ class VideoMAEModelTrainer:
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             gradient_checkpointing=self.config.gradient_checkpointing,
             max_steps=self.config.max_steps,
+            lr_scheduler_type=self.config.lr_scheduler_type,
             torch_compile=self.config.torch_compile,
             tf32=self.config.tf32,
             report_to="none",

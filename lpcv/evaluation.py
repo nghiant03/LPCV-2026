@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 from loguru import logger
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from lpcv.datasets.base import VideoDataset
@@ -239,7 +240,7 @@ def evaluate_model(
     all_labels: list[torch.Tensor] = []
 
     logger.info(f"Running inference on {len(eval_ds)} samples...")
-    for batch in loader:
+    for batch in tqdm(loader, desc="Evaluating", unit="batch"):
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"]
 

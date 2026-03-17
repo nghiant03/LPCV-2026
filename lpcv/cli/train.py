@@ -96,7 +96,7 @@ def videomae(
     from lpcv.datasets.base import load_video_dataset
     from lpcv.datasets.decoder import get_decoder
     from lpcv.models.videomae import VideoMAETrainerConfig
-    from lpcv.transforms import DECODE_TRAIN_PRESET, DECODE_VAL_PRESET, build_transform
+    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, build_transform
 
     pin_memory = True
     decoder_kwargs: dict[str, str | int | None] = {}
@@ -107,8 +107,8 @@ def videomae(
             logger.info(f"NVDEC multi-GPU enabled: distributing decoding across {num_gpus} GPUs")
 
     video_decoder = get_decoder(decoder, **decoder_kwargs)
-    train_transform = build_transform(DECODE_TRAIN_PRESET)
-    val_transform = build_transform(DECODE_VAL_PRESET)
+    train_transform = build_transform(TRAIN_PRESET)
+    val_transform = build_transform(VAL_PRESET)
     train_ds, eval_ds = load_video_dataset(
         data_dir=data_dir,
         decoder=video_decoder,

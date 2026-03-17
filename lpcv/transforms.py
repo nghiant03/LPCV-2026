@@ -353,35 +353,17 @@ class Resize:
 # ---------------------------------------------------------------------------
 
 TRAIN_PRESET: list[dict[str, Any]] = [
-    {"name": "UniformTemporalSubsample", "num_frames": 16},
     {"name": "ScalePixels"},
     {"name": "Normalize", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
     {"name": "RandomShortSideScale", "min_size": 256, "max_size": 320},
     {"name": "RandomCrop", "height": 224},
     {"name": "RandomHorizontalFlip", "p": 0.5},
 ]
-"""Training preset with temporal subsampling and random augmentation."""
+"""Training preset."""
 
 VAL_PRESET: list[dict[str, Any]] = [
-    {"name": "UniformTemporalSubsample", "num_frames": 16},
     {"name": "ScalePixels"},
     {"name": "Normalize", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
     {"name": "Resize", "height": 224},
 ]
-"""Validation preset with temporal subsampling and deterministic resize."""
-
-DECODE_TRAIN_PRESET: list[dict[str, Any]] = [
-    {"name": "ScalePixels"},
-    {"name": "Normalize", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
-    {"name": "RandomShortSideScale", "min_size": 256, "max_size": 320},
-    {"name": "RandomCrop", "height": 224},
-    {"name": "RandomHorizontalFlip", "p": 0.5},
-]
-"""Training preset without temporal subsampling (decoder handles it)."""
-
-DECODE_VAL_PRESET: list[dict[str, Any]] = [
-    {"name": "ScalePixels"},
-    {"name": "Normalize", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
-    {"name": "Resize", "height": 224},
-]
-"""Validation preset without temporal subsampling (decoder handles it)."""
+"""Validation preset."""

@@ -4,14 +4,18 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
 
 app = typer.Typer(help="Model evaluation operations.")
 
 
 @app.command("model")
 def model(
-    model_path: Annotated[Path, typer.Argument(help="Path to the trained model directory.")],
-    data_dir: Annotated[Path, typer.Argument(help="Root directory of the QEVD dataset.")],
+    data_dir: Annotated[Path, typer.Argument(help="Path to QEVD dataset or cached DatasetDict.")],
+    model_path: Annotated[
+        str,
+        typer.Option("--model-path", "-m", help="Path to the trained model directory."),
+    ] = "model",
     num_frames: Annotated[
         int,
         typer.Option("--num-frames", help="Number of frames to sample per video."),
@@ -20,10 +24,6 @@ def model(
         int,
         typer.Option("--batch-size", "-b", help="Batch size for inference."),
     ] = 8,
-    num_workers: Annotated[
-        int,
-        typer.Option("--num-workers", "-w", help="Number of dataloader workers."),
-    ] = 4,
     clips_per_video: Annotated[
         int,
         typer.Option(
@@ -31,22 +31,39 @@ def model(
             help="Number of clips to sample per video for multi-clip aggregation.",
         ),
     ] = 1,
+    decoder: Annotated[
+        str,
+        typer.Option(
+            "--decoder",
+            help="Video decoder backend: 'pyav', 'torchcodec-cpu', or 'torchcodec-nvdec'.",
+        ),
+    ] = "torchcodec-nvdec",
 ) -> None:
     """Evaluate a trained VideoMAE model on the QEVD validation set."""
+    from lpcv.datasets.base import load_video_dataset
+    from lpcv.datasets.decoder import get_decoder
     from lpcv.evaluation import evaluate_model
+    from lpcv.transforms import VAL_PRESET, build_transform
+
+    video_decoder = get_decoder(decoder)
+    val_transform = build_transform(VAL_PRESET)
+    _, eval_ds = load_video_dataset(
+        data_dir=data_dir,
+        decoder=video_decoder,
+        val_transform=val_transform,
+        num_frames=num_frames,
+    )
 
     results = evaluate_model(
-        model_path=model_path,
-        data_dir=data_dir,
-        num_frames=num_frames,
+        model_path=Path(model_path),
+        eval_ds=eval_ds,
         batch_size=batch_size,
-        num_workers=num_workers,
         clips_per_video=clips_per_video,
     )
-    typer.echo(f"Clip  Acc@1: {results['clip_top1_accuracy']:.2f}%")
-    typer.echo(f"Clip  Acc@5: {results['clip_top5_accuracy']:.2f}%")
-    typer.echo(f"Video Acc@1: {results['video_top1_accuracy']:.2f}%")
-    typer.echo(f"Video Acc@5: {results['video_top5_accuracy']:.2f}%")
+    logger.info(f"Clip  Acc@1: {results['clip_top1_accuracy']:.2f}%")
+    logger.info(f"Clip  Acc@5: {results['clip_top5_accuracy']:.2f}%")
+    logger.info(f"Video Acc@1: {results['video_top1_accuracy']:.2f}%")
+    logger.info(f"Video Acc@5: {results['video_top5_accuracy']:.2f}%")
 
 
 @app.command("h5")
@@ -71,5 +88,5 @@ def h5(
         class_map_path=class_map,
         verbose=verbose,
     )
-    typer.echo(f"Top-1 Accuracy: {results['top1_accuracy']:.2f}%")
-    typer.echo(f"Top-5 Accuracy: {results['top5_accuracy']:.2f}%")
+    logger.info(f"Top-1 Accuracy: {results['top1_accuracy']:.2f}%")
+    logger.info(f"Top-5 Accuracy: {results['top5_accuracy']:.2f}%")

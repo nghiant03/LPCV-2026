@@ -14,8 +14,8 @@ def model(
     data_dir: Annotated[Path, typer.Argument(help="Path to QEVD dataset or cached DatasetDict.")],
     model_path: Annotated[
         str,
-        typer.Option("--model-path", "-m", help="Path to the trained model directory."),
-    ] = "model",
+        typer.Argument(help="Path to the trained model directory."),
+    ],
     num_frames: Annotated[
         int,
         typer.Option("--num-frames", help="Number of frames to sample per video."),

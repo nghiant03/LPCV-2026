@@ -193,13 +193,20 @@ def evaluate_model(
     num_frames: int = 16,
     batch_size: int = 8,
     num_workers: int = 4,
+    clips_per_video: int = 1,
     augmentation: Callable[[list[Image.Image]], list[Image.Image]] | None = None,
 ) -> dict[str, float]:
     """Run end-to-end inference on a dataset and compute accuracy.
 
     Loads a saved ``VideoMAEForVideoClassification`` checkpoint, preprocesses
-    the evaluation split, runs batched forward passes, and returns top-1 /
-    top-5 accuracy.
+    the evaluation split, runs batched forward passes, and returns clip-level
+    and video-level top-1 / top-5 accuracy.
+
+    When *clips_per_video* > 1 each video is sampled multiple times using
+    uniformly-spaced starting offsets.  The softmax probabilities of all clips
+    belonging to the same video are **summed** (matching the reference
+    evaluation from the LPCVC Track 2 sample solution) and accuracy is
+    computed on the aggregated predictions.
 
     Parameters
     ----------
@@ -208,11 +215,14 @@ def evaluate_model(
     data_dir
         Root directory of the QEVD dataset (videofolder or saved DatasetDict).
     num_frames
-        Number of frames to sample per video.
+        Number of frames to sample per clip.
     batch_size
-        Inference batch size.
+        Inference batch size (in clips).
     num_workers
         Dataloader workers (unused currently — batching is manual).
+    clips_per_video
+        Number of clips to extract from each video.  When ``1`` (default),
+        behaviour is identical to single-sample evaluation.
     augmentation
         Optional callable applied to sampled PIL frames before the
         processor.  Receives and returns a list of PIL images.
@@ -220,8 +230,8 @@ def evaluate_model(
     Returns
     -------
     dict[str, float]
-        ``{"top1_accuracy": <float>, "top5_accuracy": <float>}`` as
-        percentages.
+        ``{"clip_top1_accuracy", "clip_top5_accuracy",
+        "video_top1_accuracy", "video_top5_accuracy"}`` as percentages.
 
     Raises
     ------
@@ -235,9 +245,26 @@ def evaluate_model(
         VideoMAEImageProcessor,
     )
 
-    processor = VideoMAEImageProcessor.from_pretrained(str(model_path))
+    model_path = Path(model_path)
     model = VideoMAEForVideoClassification.from_pretrained(str(model_path))
     model.eval()
+
+    processor_config = model_path / "preprocessor_config.json"
+    if processor_config.exists():
+        processor = VideoMAEImageProcessor.from_pretrained(str(model_path))
+    else:
+        logger.info(
+            "No preprocessor_config.json in {}; constructing processor with ImageNet stats",
+            model_path,
+        )
+        processor = VideoMAEImageProcessor(
+            do_resize=True,
+            size={"shortest_edge": 224},
+            do_center_crop=True,
+            crop_size={"height": 224, "width": 224},
+            image_mean=[0.485, 0.456, 0.406],
+            image_std=[0.229, 0.224, 0.225],
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)  # type: ignore[assignment]
@@ -260,55 +287,124 @@ def evaluate_model(
     def _frames_to_pil(frames_array: np.ndarray) -> list[Image.Image]:
         return [Image.fromarray(frames_array[i]) for i in range(frames_array.shape[0])]
 
-    def preprocess(examples: dict) -> dict:
-        from lpcv.datasets.utils import subsample
+    def _sample_clips(
+        frames: list[Image.Image],
+        n_clips: int,
+        n_frames: int,
+    ) -> list[list[Image.Image]]:
+        """Sample *n_clips* clips of *n_frames* from *frames*.
 
-        all_pixel_values = []
+        Clips are uniformly spaced across the video.  Each clip is a
+        contiguous window of *n_frames* frames (or uniform-subsampled if
+        the video is shorter than ``n_clips * n_frames``).
+        """
+        total = len(frames)
+        if total == 0:
+            return []
+
+        if n_clips == 1:
+            from lpcv.datasets.utils import subsample
+
+            return [subsample(frames, n_frames, mode="uniform")]
+
+        clips: list[list[Image.Image]] = []
+        if total <= n_frames:
+            clip = frames + [frames[-1]] * (n_frames - total)
+            return [clip] * n_clips
+
+        max_start = total - n_frames
+        starts = np.linspace(0, max_start, n_clips).astype(int).tolist()
+
+        for s in starts:
+            clip = frames[s : s + n_frames]
+            clips.append(clip)
+        return clips
+
+    def preprocess(examples: dict) -> dict:
+        all_pixel_values: list[torch.Tensor] = []
+        all_labels: list[int] = []
+        all_video_indices: list[int] = []
+
         sources = examples["frames"] if is_decoded else examples["video"]
 
-        for source in sources:
+        for video_idx_in_batch, source in enumerate(sources):
             frames = _frames_to_pil(np.array(source)) if is_decoded else list(source)
+            clips = _sample_clips(frames, clips_per_video, num_frames)
 
-            sampled = subsample(frames, num_frames, mode="uniform")
+            for clip_frames in clips:
+                if augmentation is not None:
+                    clip_frames = augmentation(clip_frames)
 
-            if augmentation is not None:
-                sampled = augmentation(sampled)
-
-            pixel_values = processor(sampled, return_tensors="pt")["pixel_values"]
-            all_pixel_values.append(pixel_values.squeeze(0))
+                pixel_values = processor(clip_frames, return_tensors="pt")["pixel_values"]
+                all_pixel_values.append(pixel_values.squeeze(0))
+                all_labels.append(examples["label"][video_idx_in_batch])
+                all_video_indices.append(video_idx_in_batch)
 
         examples["pixel_values"] = all_pixel_values
-        examples["labels"] = examples["label"]
+        examples["labels"] = all_labels
+        examples["video_index"] = all_video_indices
         return examples
 
-    logger.info(f"Preprocessing {len(eval_ds)} evaluation samples...")
+    logger.info(
+        f"Preprocessing {len(eval_ds)} evaluation samples ({clips_per_video} clip(s) per video)..."
+    )
     cols_to_remove = ["frames"] if is_decoded else ["video"]
-    processed = eval_ds.map(preprocess, batched=True, batch_size=4, remove_columns=cols_to_remove)
+    processed = eval_ds.map(
+        preprocess,
+        batched=True,
+        batch_size=4,
+        remove_columns=cols_to_remove,
+    )
     processed.set_format("torch")
 
-    all_logits = []
-    all_labels = []
+    all_logits: list[torch.Tensor] = []
+    all_labels: list[torch.Tensor] = []
+    all_video_indices: list[torch.Tensor] = []
 
     logger.info("Running inference...")
     for i in range(0, len(processed), batch_size):
         batch_items = [processed[j] for j in range(i, min(i + batch_size, len(processed)))]
         pixel_values = torch.stack([item["pixel_values"] for item in batch_items]).to(device)
         labels = torch.tensor([item["labels"] for item in batch_items], dtype=torch.long)
+        video_indices = torch.tensor(
+            [item["video_index"] for item in batch_items], dtype=torch.long
+        )
 
         with torch.no_grad():
             outputs = model(pixel_values=pixel_values)
 
         all_logits.append(outputs.logits.cpu())
         all_labels.append(labels)
+        all_video_indices.append(video_indices)
 
     logits_t = torch.cat(all_logits, dim=0)
     labels_t = torch.cat(all_labels, dim=0)
-    probs = torch.softmax(logits_t, dim=1)
+    video_indices_t = torch.cat(all_video_indices, dim=0)
+    clip_probs = torch.softmax(logits_t, dim=1)
 
-    acc1, acc5 = topk_accuracy(probs, labels_t, topk=(1, 5))
+    clip_acc1, clip_acc5 = topk_accuracy(clip_probs, labels_t, topk=(1, 5))
 
-    results = {"top1_accuracy": acc1.item(), "top5_accuracy": acc5.item()}
-    logger.info(f"Top-1 Accuracy: {results['top1_accuracy']:.2f}%")
-    logger.info(f"Top-5 Accuracy: {results['top5_accuracy']:.2f}%")
+    num_videos = int(video_indices_t.max().item()) + 1
+    num_classes = clip_probs.shape[1]
+    agg_probs = torch.zeros((num_videos, num_classes), dtype=torch.float32)
+    agg_labels = torch.zeros(num_videos, dtype=torch.long)
+
+    for idx in range(clip_probs.shape[0]):
+        vid = int(video_indices_t[idx].item())
+        agg_probs[vid] += clip_probs[idx]
+        agg_labels[vid] = labels_t[idx]
+
+    video_acc1, video_acc5 = topk_accuracy(agg_probs, agg_labels, topk=(1, 5))
+
+    results = {
+        "clip_top1_accuracy": clip_acc1.item(),
+        "clip_top5_accuracy": clip_acc5.item(),
+        "video_top1_accuracy": video_acc1.item(),
+        "video_top5_accuracy": video_acc5.item(),
+    }
+    logger.info(f"Clip  Acc@1: {results['clip_top1_accuracy']:.2f}%")
+    logger.info(f"Clip  Acc@5: {results['clip_top5_accuracy']:.2f}%")
+    logger.info(f"Video Acc@1: {results['video_top1_accuracy']:.2f}%")
+    logger.info(f"Video Acc@5: {results['video_top5_accuracy']:.2f}%")
 
     return results

@@ -25,11 +25,6 @@ if TYPE_CHECKING:
     from datasets import Dataset
     from torch.utils.data import Dataset as TorchDataset
 
-DEFAULT_MODEL_NAME = "MCG-NJU/videomae-base"
-DEFAULT_NUM_FRAMES = 16
-DEFAULT_IMAGE_SIZE = 224
-DEFAULT_FREEZE_STRATEGY = "none"
-
 
 @dataclass
 class VideoMAETrainerConfig:
@@ -101,9 +96,9 @@ class VideoMAETrainerConfig:
         Additional keyword arguments forwarded to ``TrainingArguments``.
     """
 
-    model_name: str = DEFAULT_MODEL_NAME
-    num_frames: int = DEFAULT_NUM_FRAMES
-    image_size: int = DEFAULT_IMAGE_SIZE
+    model_name: str = "MCG-NJU/videomae-base"
+    num_frames: int = 16
+    image_size: int = 224
     output_dir: str = "output"
     num_train_epochs: int = 15
     per_device_train_batch_size: int = 8
@@ -128,7 +123,7 @@ class VideoMAETrainerConfig:
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = False
     max_steps: int = -1
-    freeze_strategy: str = DEFAULT_FREEZE_STRATEGY
+    freeze_strategy: str = "none"
     torch_compile: bool = False
     tf32: bool = False
     extra_args: dict[str, Any] = field(default_factory=dict)

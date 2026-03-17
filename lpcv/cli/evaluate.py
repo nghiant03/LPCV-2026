@@ -24,6 +24,13 @@ def model(
         int,
         typer.Option("--num-workers", "-w", help="Number of dataloader workers."),
     ] = 4,
+    clips_per_video: Annotated[
+        int,
+        typer.Option(
+            "--clips-per-video",
+            help="Number of clips to sample per video for multi-clip aggregation.",
+        ),
+    ] = 1,
 ) -> None:
     """Evaluate a trained VideoMAE model on the QEVD validation set."""
     from lpcv.evaluation import evaluate_model
@@ -34,9 +41,12 @@ def model(
         num_frames=num_frames,
         batch_size=batch_size,
         num_workers=num_workers,
+        clips_per_video=clips_per_video,
     )
-    typer.echo(f"Top-1 Accuracy: {results['top1_accuracy']:.2f}%")
-    typer.echo(f"Top-5 Accuracy: {results['top5_accuracy']:.2f}%")
+    typer.echo(f"Clip  Acc@1: {results['clip_top1_accuracy']:.2f}%")
+    typer.echo(f"Clip  Acc@5: {results['clip_top5_accuracy']:.2f}%")
+    typer.echo(f"Video Acc@1: {results['video_top1_accuracy']:.2f}%")
+    typer.echo(f"Video Acc@5: {results['video_top5_accuracy']:.2f}%")
 
 
 @app.command("h5")

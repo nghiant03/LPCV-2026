@@ -265,19 +265,12 @@ class VideoMAEModelTrainer:
         dict[str, float]
             ``{"accuracy": <top1>, "top5_accuracy": <top5>}`` as percentages.
         """
-        logits = eval_pred.predictions
-        labels = eval_pred.label_ids
-        logits_t = torch.as_tensor(logits)
-        predictions = logits_t.argmax(dim=-1)
-        labels_t = torch.as_tensor(labels)
+        from lpcv.evaluation import topk_accuracy
 
-        acc1 = (predictions == labels_t).float().mean().item() * 100.0
-
-        top5_pred = logits_t.topk(min(5, logits_t.shape[-1]), dim=-1).indices
-        correct_top5 = top5_pred.eq(labels_t.unsqueeze(-1)).any(dim=-1).float().mean().item()
-        acc5 = correct_top5 * 100.0
-
-        return {"accuracy": acc1, "top5_accuracy": acc5}
+        logits_t = torch.as_tensor(eval_pred.predictions)
+        labels_t = torch.as_tensor(eval_pred.label_ids)
+        acc1, acc5 = topk_accuracy(logits_t, labels_t, topk=(1, 5))
+        return {"accuracy": acc1.item(), "top5_accuracy": acc5.item()}
 
     def _collate_fn(self, examples: list[dict]) -> dict[str, torch.Tensor]:
         """Collate a list of sample dicts into a batched dict.

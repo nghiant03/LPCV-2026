@@ -73,7 +73,7 @@ def load_logits_h5(h5_path: str | Path) -> np.ndarray:
     with h5py.File(h5_path, "r") as f:
         grp = f["data/0"]
         assert isinstance(grp, h5py.Group)
-        sorted_keys = sorted(grp.keys(), key=lambda x: int(x.split("_")[1]))
+        sorted_keys = sorted(grp.keys(), key=lambda x: int(x.rsplit("_", 1)[1]))
         for k in sorted_keys:
             ds = grp[k]
             assert isinstance(ds, h5py.Dataset)

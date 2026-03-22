@@ -11,7 +11,6 @@ import shutil
 from pathlib import Path
 
 import av
-import numpy as np
 from av.video.stream import VideoStream
 from loguru import logger
 
@@ -209,54 +208,3 @@ def uniform_temporal_indices(total: int, num_frames: int) -> list[int]:
     import torch
 
     return torch.linspace(0, total - 1, num_frames).long().tolist()
-
-
-def subsample(
-    frames: list,
-    num_frames: int = 16,
-    *,
-    mode: str = "dense",
-    stride: int = 4,
-) -> list:
-    """Subsample a list of frames to exactly *num_frames*.
-
-    Parameters
-    ----------
-    frames
-        Input frame list (PIL images, numpy arrays, etc.).
-    num_frames
-        Desired output length.
-    mode
-        Sampling strategy:
-
-        - ``"dense"`` — pick a random contiguous window of size
-          ``num_frames * stride`` and take every *stride*-th frame.  Falls
-          back to uniform when the video is shorter than the window.
-        - ``"uniform"`` — evenly-spaced indices across the full video.  Pads
-          with the last frame if the video is shorter than *num_frames*.
-    stride
-        Step size for ``"dense"`` sampling.
-
-    Returns
-    -------
-    list
-        Subsampled frames of length *num_frames* (or empty if input is empty).
-    """
-    total = len(frames)
-    if total == 0:
-        return []
-
-    if mode == "dense":
-        window_size = num_frames * stride
-        if total >= window_size:
-            start = int(np.random.randint(0, total - window_size + 1))
-            indices = list(range(start, start + window_size, stride))
-            return [frames[i] for i in indices]
-        indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
-        return [frames[i] for i in indices]
-
-    if total >= num_frames:
-        indices = np.linspace(0, total - 1, num_frames).astype(int).tolist()
-        return [frames[i] for i in indices]
-
-    return frames + [frames[-1]] * (num_frames - total)

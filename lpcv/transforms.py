@@ -23,6 +23,8 @@ import torch
 import torch.nn.functional as F
 from torchvision.transforms import Compose
 
+from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
+
 TransformFactory = Callable[..., Callable[[torch.Tensor], torch.Tensor]]
 """Type alias for a callable that produces a transform function."""
 
@@ -354,7 +356,7 @@ class Resize:
 
 TRAIN_PRESET: list[dict[str, Any]] = [
     {"name": "ScalePixels"},
-    {"name": "Normalize", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
+    {"name": "Normalize", "mean": IMAGENET_MEAN, "std": IMAGENET_STD},
     {"name": "RandomShortSideScale", "min_size": 256, "max_size": 320},
     {"name": "RandomCrop", "height": 224},
     {"name": "RandomHorizontalFlip", "p": 0.5},
@@ -363,7 +365,7 @@ TRAIN_PRESET: list[dict[str, Any]] = [
 
 VAL_PRESET: list[dict[str, Any]] = [
     {"name": "ScalePixels"},
-    {"name": "Normalize", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
+    {"name": "Normalize", "mean": IMAGENET_MEAN, "std": IMAGENET_STD},
     {"name": "Resize", "height": 224},
 ]
 """Validation preset."""

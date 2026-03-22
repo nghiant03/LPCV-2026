@@ -19,6 +19,8 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
+from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
+
 if TYPE_CHECKING:
     from lpcv.datasets.decoder import VideoDecoder
 
@@ -91,8 +93,8 @@ def preprocess_dataset(
         raise FileNotFoundError(f"No videos found in {val_dir}")
 
     manifest_path = output_dir / "manifest.jsonl"
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
 
     logger.info(f"Preprocessing {len(video_entries)} videos → {output_dir}")
 
@@ -329,7 +331,6 @@ def run_inference_on_hub(
             combined_logits.append(arr)
 
     logger.info(f"Collected {len(combined_logits)} results, writing to {output_h5}")
-
 
     with h5py.File(str(output_h5), "w") as f:
         grp = f.create_group("data/0")

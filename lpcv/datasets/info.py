@@ -8,3 +8,9 @@ SPLIT_DIRS = {"train", "val"}
 
 TARGET_LABEL_FILE_NAME = "class_labels.json"
 """Default filename for the JSON list of target class labels."""
+
+IMAGENET_MEAN: list[float] = [0.485, 0.456, 0.406]
+"""ImageNet per-channel mean used for normalisation."""
+
+IMAGENET_STD: list[float] = [0.229, 0.224, 0.225]
+"""ImageNet per-channel standard deviation used for normalisation."""

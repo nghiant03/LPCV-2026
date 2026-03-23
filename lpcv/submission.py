@@ -3,10 +3,13 @@
 Provides:
 
 - :func:`preprocess_dataset` — decode videos to ``.npy`` tensors + ``manifest.jsonl``.
-- :func:`export_onnx` — wrap model with competition adapter and export to ONNX.
+- :func:`export_onnx` — wrap model with auto-built adapter and export to ONNX.
 - :func:`compile_on_hub` — compile an ONNX model on Qualcomm AI Hub.
 - :func:`run_inference_on_hub` — upload tensors and run on-device inference.
-- :func:`register_model` — register a new model type for the submission pipeline.
+
+The adapter layer is automatically constructed from the ``val_transform.json``
+saved alongside each model checkpoint.  Steps that differ from the competition's
+fixed pipeline are baked into the ONNX graph.
 """
 
 from __future__ import annotations
@@ -14,9 +17,8 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import onnx
@@ -45,107 +47,6 @@ CHUNK_SIZE = 538
 
 FRAME_RATE = 4
 """Frame rate used by the competition's VideoClips-based preprocessing."""
-
-
-@dataclass
-class SubmissionModelConfig:
-    """Describes how a model integrates with the competition submission pipeline.
-
-    Parameters
-    ----------
-    spatial_size
-        Spatial resolution expected by the model (e.g. 224 for VideoMAE).
-    mean
-        Per-channel mean for normalisation (length 3).
-    std
-        Per-channel standard deviation for normalisation (length 3).
-    input_layout
-        Expected tensor layout: ``"BTCHW"`` or ``"BCTHW"``.
-    input_key
-        Keyword argument name for the model's forward method (e.g. ``"pixel_values"``).
-    output_extractor
-        Callable that extracts logits from the model's raw output.
-        Defaults to ``lambda out: out.logits``.
-    loader
-        Callable ``(path: str) -> torch.nn.Module`` that loads a checkpoint.
-    """
-
-    spatial_size: int
-    mean: list[float]
-    std: list[float]
-    input_layout: str = "BTCHW"
-    input_key: str = "pixel_values"
-    output_extractor: Callable[..., torch.Tensor] = field(
-        default_factory=lambda: lambda out: out.logits
-    )
-    loader: Callable[[str], torch.nn.Module] | None = None
-
-
-_MODEL_REGISTRY: dict[str, SubmissionModelConfig] = {}
-"""Registry of model configs by name."""
-
-
-def register_model(name: str, config: SubmissionModelConfig) -> None:
-    """Register a model configuration for the submission pipeline.
-
-    Parameters
-    ----------
-    name
-        Short name used to select the model (e.g. ``"videomae"``).
-    config
-        Configuration describing how to load and run the model.
-    """
-    _MODEL_REGISTRY[name] = config
-
-
-def get_model_config(name: str) -> SubmissionModelConfig:
-    """Retrieve a registered model configuration by name.
-
-    Parameters
-    ----------
-    name
-        Registered model name.
-
-    Returns
-    -------
-    SubmissionModelConfig
-        The configuration for the requested model.
-
-    Raises
-    ------
-    KeyError
-        If the model name is not registered.
-    """
-    if name not in _MODEL_REGISTRY:
-        available = ", ".join(sorted(_MODEL_REGISTRY)) or "(none)"
-        raise KeyError(f"Unknown model type {name!r}. Available: {available}")
-    return _MODEL_REGISTRY[name]
-
-
-def _register_builtins() -> None:
-    """Register built-in model types."""
-    from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
-
-    def _load_videomae(path: str) -> torch.nn.Module:
-        from transformers import VideoMAEForVideoClassification
-
-        return VideoMAEForVideoClassification.from_pretrained(path)
-
-    register_model(
-        "videomae",
-        SubmissionModelConfig(
-            spatial_size=224,
-            mean=IMAGENET_MEAN,
-            std=IMAGENET_STD,
-            input_layout="BTCHW",
-            input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
-            loader=_load_videomae,
-        ),
-    )
-
-
-_register_builtins()
 
 
 def preprocess_dataset(
@@ -222,7 +123,7 @@ def preprocess_dataset(
 
     spatial = T.Compose(
         [
-            T.ConvertImageDtype(torch.float32),
+            T.Lambda(lambda x: x / 255.0 if x.max() > 1.0 else x),
             T.Resize(COMPETITION_RESIZE_HW, antialias=False),
             T.Normalize(mean=R2PLUS1D_MEAN, std=R2PLUS1D_STD),
             T.CenterCrop(COMPETITION_SPATIAL_SIZE),
@@ -266,16 +167,13 @@ class CompetitionAdapter(torch.nn.Module):
     """Adapter that converts competition input to any video model's expected format.
 
     The competition feeds ``(B, C, T, H, W)`` tensors at 112x112, normalized
-    with R(2+1)D mean/std.  Different models expect different spatial sizes,
-    normalization stats, and input layouts.
+    with R(2+1)D mean/std.  When the model's validation pipeline differs from
+    the competition pipeline, this adapter undoes the competition transforms
+    and applies the model's expected transforms — all in-graph for ONNX export.
 
-    This wrapper performs (all in-graph for ONNX export):
-
-    1. **Denormalize** — undo the R(2+1)D mean/std.
-    2. **Resize** — bilinear interpolate from 112x112 to the model's spatial size.
-    3. **Renormalize** — apply the model's expected mean/std.
-    4. **Permute** — rearrange to the model's expected input layout.
-    5. **Forward** — through the inner model.
+    When the model's val pipeline matches the competition pipeline exactly
+    (i.e. no adapter steps), this module is a thin pass-through that only
+    handles the layout permutation and model forward call.
     """
 
     src_mean: torch.Tensor
@@ -286,21 +184,42 @@ class CompetitionAdapter(torch.nn.Module):
     def __init__(
         self,
         model: torch.nn.Module,
-        src_mean: list[float],
-        src_std: list[float],
-        dst_mean: list[float],
-        dst_std: list[float],
-        target_spatial: int = 224,
-        input_layout: str = "BTCHW",
+        adapter_steps: list[dict[str, Any]],
+        input_layout: str = "BCTHW",
         input_key: str = "pixel_values",
         output_extractor: Callable[..., torch.Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.model = model
-        self.target_spatial = target_spatial
         self.input_layout = input_layout
         self.input_key = input_key
         self.output_extractor = output_extractor or (lambda out: out.logits)
+
+        self._needs_renorm = False
+        self._needs_resize = False
+        self._target_spatial = COMPETITION_SPATIAL_SIZE
+
+        src_mean = [0.0, 0.0, 0.0]
+        src_std = [1.0, 1.0, 1.0]
+        dst_mean = [0.0, 0.0, 0.0]
+        dst_std = [1.0, 1.0, 1.0]
+
+        for step in adapter_steps:
+            name = step["name"]
+            if name == "Normalize":
+                self._needs_renorm = True
+                dst_mean = step["mean"]
+                dst_std = step["std"]
+            elif name in ("Resize", "CenterCrop", "RandomCrop"):
+                self._needs_resize = True
+                self._target_spatial = step["height"]
+
+        if self._needs_renorm:
+            from lpcv.datasets.info import R2PLUS1D_MEAN, R2PLUS1D_STD
+
+            src_mean = R2PLUS1D_MEAN
+            src_std = R2PLUS1D_STD
+
         self.register_buffer("src_mean", torch.tensor(src_mean).view(1, 3, 1, 1, 1))
         self.register_buffer("src_std", torch.tensor(src_std).view(1, 3, 1, 1, 1))
         self.register_buffer("dst_mean", torch.tensor(dst_mean).view(1, 3, 1, 1, 1))
@@ -319,20 +238,25 @@ class CompetitionAdapter(torch.nn.Module):
         torch.Tensor
             Classification logits.
         """
-        x = pixel_values * self.src_std + self.src_mean
+        x = pixel_values
 
-        b, c, t, h, w = x.shape
-        x = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
-        x = torch.nn.functional.interpolate(
-            x,
-            size=(self.target_spatial, self.target_spatial),
-            mode="bilinear",
-            align_corners=False,
-        )
-        x = x.reshape(b, t, c, self.target_spatial, self.target_spatial)
-        x = x.permute(0, 2, 1, 3, 4)
+        if self._needs_renorm:
+            x = x * self.src_std + self.src_mean
 
-        x = (x - self.dst_mean) / self.dst_std
+        if self._needs_resize:
+            b, c, t, h, w = x.shape
+            x = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+            x = torch.nn.functional.interpolate(
+                x,
+                size=(self._target_spatial, self._target_spatial),
+                mode="bilinear",
+                align_corners=False,
+            )
+            x = x.reshape(b, t, c, self._target_spatial, self._target_spatial)
+            x = x.permute(0, 2, 1, 3, 4)
+
+        if self._needs_renorm:
+            x = (x - self.dst_mean) / self.dst_std
 
         if self.input_layout == "BTCHW":
             x = x.permute(0, 2, 1, 3, 4)
@@ -340,61 +264,74 @@ class CompetitionAdapter(torch.nn.Module):
         return self.output_extractor(self.model(**{self.input_key: x}))
 
     @classmethod
-    def from_config(
+    def from_saved_config(
         cls,
         model: torch.nn.Module,
-        config: SubmissionModelConfig,
-        src_mean: list[float] | None = None,
-        src_std: list[float] | None = None,
+        model_path: str | Path,
+        input_layout: str = "BCTHW",
+        input_key: str = "pixel_values",
+        output_extractor: Callable[..., torch.Tensor] | None = None,
     ) -> CompetitionAdapter:
-        """Create an adapter from a :class:`SubmissionModelConfig`.
+        """Build an adapter from a saved ``val_transform.json``.
+
+        Reads the validation transform config saved alongside the model
+        checkpoint, computes which steps differ from the competition
+        pipeline, and constructs an adapter that applies only those
+        differences in-graph.
 
         Parameters
         ----------
         model
-            The inner model to wrap.
-        config
-            Model configuration from the registry.
-        src_mean
-            Source normalization mean (competition pipeline). If ``None``,
-            uses R(2+1)D mean from ``lpcv.datasets.info``.
-        src_std
-            Source normalization std (competition pipeline). If ``None``,
-            uses R(2+1)D std from ``lpcv.datasets.info``.
+            The loaded inner model.
+        model_path
+            Directory containing the checkpoint and ``val_transform.json``.
+        input_layout
+            Expected tensor layout of the inner model.
+        input_key
+            Keyword argument name for the model's forward method.
+        output_extractor
+            Extracts logits from the model's raw output.
 
         Returns
         -------
         CompetitionAdapter
             Configured adapter instance.
         """
-        from lpcv.datasets.info import R2PLUS1D_MEAN, R2PLUS1D_STD
+        from lpcv.transforms import extract_adapter_steps, load_val_transform_config
+
+        model_path = Path(model_path)
+        config_path = model_path / "val_transform.json"
+
+        if config_path.is_file():
+            val_config = load_val_transform_config(config_path)
+            adapter_steps = extract_adapter_steps(val_config)
+        else:
+            logger.warning(
+                f"No val_transform.json found in {model_path}; assuming no adapter needed"
+            )
+            adapter_steps = []
 
         return cls(
             model=model,
-            src_mean=src_mean or R2PLUS1D_MEAN,
-            src_std=src_std or R2PLUS1D_STD,
-            dst_mean=config.mean,
-            dst_std=config.std,
-            target_spatial=config.spatial_size,
-            input_layout=config.input_layout,
-            input_key=config.input_key,
-            output_extractor=config.output_extractor,
+            adapter_steps=adapter_steps,
+            input_layout=input_layout,
+            input_key=input_key,
+            output_extractor=output_extractor,
         )
 
 
 def export_onnx(
     model_path: str | Path,
     output_path: str | Path,
-    model_type: str = "videomae",
+    model_type: str = "r2plus1d",
     num_frames: int = DEFAULT_NUM_FRAMES,
     opset_version: int = 18,
 ) -> Path:
-    """Wrap a trained checkpoint with the competition adapter and export to ONNX.
+    """Wrap a trained checkpoint with the auto-built adapter and export to ONNX.
 
-    The exported model accepts the competition's fixed input shape
-    ``(1, 3, T, 112, 112)`` (R(2+1)D-normalised) and internally
-    denormalises, resizes to the model's expected spatial resolution,
-    re-normalises, permutes, then forwards through the model.
+    The adapter is constructed automatically from the ``val_transform.json``
+    saved alongside the model checkpoint.  Only transforms that differ from
+    the competition's fixed pipeline are baked into the ONNX graph.
 
     Parameters
     ----------
@@ -403,7 +340,7 @@ def export_onnx(
     output_path
         File path for the exported ``.onnx`` model.
     model_type
-        Registered model name (e.g. ``"videomae"``).
+        Registered model name (e.g. ``"r2plus1d"``, ``"videomae"``).
     num_frames
         Temporal dimension of the input tensor.
     opset_version
@@ -418,23 +355,25 @@ def export_onnx(
     ------
     KeyError
         If *model_type* is not registered.
-    ValueError
-        If the model config has no loader.
     """
+    from lpcv.models import get_model_spec
+
     model_path = Path(model_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config = get_model_config(model_type)
-    if config.loader is None:
-        raise ValueError(
-            f"Model type {model_type!r} has no loader. "
-            f"Register one via register_model() with a loader callback."
-        )
+    spec = get_model_spec(model_type)
 
     logger.info(f"Loading {model_type} model from {model_path}")
-    base_model = config.loader(str(model_path))
-    wrapped = CompetitionAdapter.from_config(base_model, config)
+    base_model = spec.loader(str(model_path))
+
+    wrapped = CompetitionAdapter.from_saved_config(
+        model=base_model,
+        model_path=model_path,
+        input_layout=spec.input_layout,
+        input_key=spec.input_key,
+        output_extractor=spec.output_extractor,
+    )
     wrapped.eval()
 
     dummy_input = torch.randn(1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)

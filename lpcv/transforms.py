@@ -5,17 +5,22 @@ instantiated from configuration dicts using :func:`build_transform`.  All
 spatial/temporal transforms operate on ``torch.Tensor`` with shape
 ``(T, C, H, W)``.
 
-Four built-in presets are provided:
+Built-in presets:
 
-- ``TRAIN_PRESET`` / ``VAL_PRESET`` — include temporal subsampling (for
-  HuggingFace ``videofolder`` pipeline).
-- ``DECODE_TRAIN_PRESET`` / ``DECODE_VAL_PRESET`` — exclude temporal
-  subsampling (decoder handles it).
+- ``TRAIN_PRESET`` / ``VAL_PRESET`` — default presets matching the LPCVC
+  reference solution (R2+1D normalisation, 128×171 resize, 112×112 crop).
+- ``VIDEOMAE_TRAIN_PRESET`` / ``VIDEOMAE_VAL_PRESET`` — VideoMAE-specific
+  presets (ImageNet normalisation, 224×224 spatial size).
+
+Each trainer saves the val transform config alongside the model checkpoint
+so the submission adapter can be auto-built from the difference between
+the saved config and the competition's fixed pipeline.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -23,7 +28,7 @@ import torch
 import torch.nn.functional as F
 from torchvision.transforms import Compose
 
-from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
+from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD, R2PLUS1D_MEAN, R2PLUS1D_STD
 
 TransformFactory = Callable[..., Callable[[torch.Tensor], torch.Tensor]]
 """Type alias for a callable that produces a transform function."""
@@ -351,21 +356,131 @@ class Resize:
 
 
 # ---------------------------------------------------------------------------
-# Default presets
+# Default presets (match LPCVC reference solution)
 # ---------------------------------------------------------------------------
 
 TRAIN_PRESET: list[dict[str, Any]] = [
+    {"name": "ScalePixels"},
+    {"name": "Resize", "height": 128, "width": 171},
+    {"name": "RandomHorizontalFlip", "p": 0.5},
+    {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
+    {"name": "RandomCrop", "height": 112},
+]
+"""Default training preset — matches the LPCVC reference solution."""
+
+VAL_PRESET: list[dict[str, Any]] = [
+    {"name": "ScalePixels"},
+    {"name": "Resize", "height": 128, "width": 171},
+    {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
+    {"name": "CenterCrop", "height": 112},
+]
+"""Default validation preset — matches the LPCVC reference solution."""
+
+# ---------------------------------------------------------------------------
+# VideoMAE presets
+# ---------------------------------------------------------------------------
+
+VIDEOMAE_TRAIN_PRESET: list[dict[str, Any]] = [
     {"name": "ScalePixels"},
     {"name": "Normalize", "mean": IMAGENET_MEAN, "std": IMAGENET_STD},
     {"name": "RandomShortSideScale", "min_size": 256, "max_size": 320},
     {"name": "RandomCrop", "height": 224},
     {"name": "RandomHorizontalFlip", "p": 0.5},
 ]
-"""Training preset."""
+"""VideoMAE training preset (ImageNet normalisation, 224×224)."""
 
-VAL_PRESET: list[dict[str, Any]] = [
+VIDEOMAE_VAL_PRESET: list[dict[str, Any]] = [
     {"name": "ScalePixels"},
     {"name": "Normalize", "mean": IMAGENET_MEAN, "std": IMAGENET_STD},
     {"name": "Resize", "height": 224},
 ]
-"""Validation preset."""
+"""VideoMAE validation preset (ImageNet normalisation, 224×224)."""
+
+
+# ---------------------------------------------------------------------------
+# Save / load / diff utilities
+# ---------------------------------------------------------------------------
+
+
+def save_val_transform_config(config: list[dict[str, Any]], path: str | Path) -> None:
+    """Save a validation transform config to a JSON file.
+
+    Parameters
+    ----------
+    config
+        List of transform step dicts (same format as presets).
+    path
+        File path to write the JSON.
+    """
+    import json
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
+
+def load_val_transform_config(path: str | Path) -> list[dict[str, Any]]:
+    """Load a validation transform config from a JSON file.
+
+    Parameters
+    ----------
+    path
+        File path to the JSON config.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Transform step dicts.
+    """
+    import json
+
+    with open(Path(path), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def extract_adapter_steps(
+    val_config: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Extract transform steps that differ from the competition pipeline.
+
+    The competition's fixed pipeline is:
+
+    1. ``ScalePixels``
+    2. ``Resize(128, 171)``
+    3. ``Normalize(R2PLUS1D_MEAN, R2PLUS1D_STD)``
+    4. ``CenterCrop(112)``
+
+    Any step in *val_config* that is **not** in this baseline is returned
+    as an adapter step that must be applied on top of the competition
+    output to reproduce the model's expected input.
+
+    When the val config exactly matches the competition pipeline an empty
+    list is returned (no adapter needed).
+
+    Parameters
+    ----------
+    val_config
+        Saved validation transform config.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Steps that deviate from the competition pipeline.  The submission
+        adapter should apply these in-graph.
+    """
+    competition_steps = [
+        {"name": "ScalePixels"},
+        {"name": "Resize", "height": 128, "width": 171},
+        {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
+        {"name": "CenterCrop", "height": 112},
+    ]
+
+    if val_config == competition_steps:
+        return []
+
+    extra: list[dict[str, Any]] = []
+    for step in val_config:
+        if step not in competition_steps:
+            extra.append(step)
+    return extra

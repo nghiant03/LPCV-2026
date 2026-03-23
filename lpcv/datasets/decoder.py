@@ -6,11 +6,19 @@ Provides a ``VideoDecoder`` protocol and three backends:
 - ``TorchCodecCPUDecoder`` — CPU decoding via TorchCodec (seek-based).
 - ``TorchCodecNVDECDecoder`` — GPU decoding via TorchCodec + NVDEC.
 
+All decoders support two frame-sampling strategies controlled by the
+*target_fps* constructor parameter:
+
+- ``None`` (default) — uniform index spacing across all frames.
+- A positive integer — FPS-based resampling matching the LPCVC
+  competition's patched ``VideoClips`` behaviour.
+
 Use ``get_decoder`` to instantiate a decoder by name.
 """
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import torch
@@ -21,14 +29,14 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class VideoDecoder(Protocol):
-    """Protocol for video decoders that extract uniformly-sampled frames.
+    """Protocol for video decoders that extract sampled frames.
 
     All implementations return a float tensor of shape ``(T, C, H, W)`` with
     pixel values in ``[0, 255]``.
     """
 
     def decode(self, path: Path, num_frames: int) -> torch.Tensor:
-        """Decode *num_frames* uniformly-spaced frames from a video file.
+        """Decode *num_frames* frames from a video file.
 
         Parameters
         ----------
@@ -45,13 +53,101 @@ class VideoDecoder(Protocol):
         ...
 
 
+def _fps_resample_indices(
+    total: int, original_fps: float, target_fps: int, num_frames: int
+) -> list[int]:
+    """Compute frame indices using FPS-based resampling.
+
+    Replicates the LPCVC competition's patched ``VideoClips`` logic:
+    resample at *target_fps*, increasing the effective rate for short
+    videos so that at least *num_frames* can be produced.
+
+    Parameters
+    ----------
+    total
+        Total decoded frame count.
+    original_fps
+        Native frame rate of the video.
+    target_fps
+        Desired resampling rate.
+    num_frames
+        Minimum number of frames required.
+
+    Returns
+    -------
+    list[int]
+        Frame indices into the original decoded frame list.
+
+    Raises
+    ------
+    ValueError
+        If *num_frames* cannot be satisfied.
+    """
+    effective_fps: float = target_fps
+    total_resampled = total * effective_fps / original_fps
+
+    if total_resampled < num_frames:
+        video_duration = total / original_fps
+        effective_fps = math.ceil(num_frames / video_duration)
+        total_resampled = total * effective_fps / original_fps
+
+    step = original_fps / effective_fps
+    indices = [min(int(i * step), total - 1) for i in range(int(math.floor(total_resampled)))]
+
+    if len(indices) < num_frames:
+        raise ValueError(
+            f"Cannot form {num_frames}-frame clip ({total} frames at {original_fps:.1f} fps)"
+        )
+
+    return indices[:num_frames]
+
+
+def _select_indices(
+    total: int, num_frames: int, original_fps: float, target_fps: int | None
+) -> list[int]:
+    """Choose frame indices using either uniform spacing or FPS-based resampling.
+
+    Parameters
+    ----------
+    total
+        Total number of available frames.
+    num_frames
+        Number of indices to return.
+    original_fps
+        Native frame rate of the video.
+    target_fps
+        When ``None``, use uniform index spacing.  Otherwise, use
+        FPS-based resampling at this rate.
+
+    Returns
+    -------
+    list[int]
+        Selected frame indices.
+    """
+    if target_fps is None:
+        from lpcv.datasets.utils import uniform_temporal_indices
+
+        return uniform_temporal_indices(total, num_frames)
+    return _fps_resample_indices(total, original_fps, target_fps, num_frames)
+
+
 class PyAVDecoder:
     """Baseline CPU decoder using PyAV.
 
-    Decodes **all** frames into memory, then uniformly subsamples.  Suitable
-    for any video format that libav supports but relatively slow for long
-    videos.
+    Decodes **all** frames into memory, then subsamples.  Suitable for any
+    video format that libav supports but relatively slow for long videos.
+
+    Parameters
+    ----------
+    target_fps
+        When ``None`` (default), frames are selected via uniform index
+        spacing.  When set to a positive integer, FPS-based resampling is
+        used instead, replicating the LPCVC competition's patched
+        ``VideoClips`` behaviour.
     """
+
+    def __init__(self, target_fps: int | None = None) -> None:
+        self.target_fps = target_fps
 
     def decode(self, path: Path, num_frames: int) -> torch.Tensor:
         """Decode frames using PyAV.
@@ -61,7 +157,7 @@ class PyAVDecoder:
         path
             Path to the video file.
         num_frames
-            Number of frames to sample uniformly.
+            Number of frames to sample.
 
         Returns
         -------
@@ -71,13 +167,16 @@ class PyAVDecoder:
         import av
         import numpy as np
 
-        from lpcv.datasets.utils import uniform_temporal_indices
-
         with av.open(str(path)) as container:
             stream = container.streams.video[0]
+            original_fps = float(stream.average_rate or stream.guessed_rate or 30)
             frames = [f for f in container.decode(stream)]
 
-        indices = uniform_temporal_indices(len(frames), num_frames)
+        total = len(frames)
+        if total == 0:
+            raise ValueError(f"No frames decoded from {path}")
+
+        indices = _select_indices(total, num_frames, original_fps, self.target_fps)
         sampled = [frames[i] for i in indices]
         t = torch.stack([torch.from_numpy(np.array(f.to_image().convert("RGB"))) for f in sampled])
         return t.float().permute(0, 3, 1, 2)
@@ -88,7 +187,17 @@ class TorchCodecCPUDecoder:
 
     Only decodes the requested frame indices (seek-based), avoiding full
     video decode.  Requires the ``torchcodec`` package.
+
+    Parameters
+    ----------
+    target_fps
+        When ``None`` (default), frames are selected via uniform index
+        spacing.  When set to a positive integer, FPS-based resampling is
+        used instead.
     """
+
+    def __init__(self, target_fps: int | None = None) -> None:
+        self.target_fps = target_fps
 
     def decode(self, path: Path, num_frames: int) -> torch.Tensor:
         """Decode frames using TorchCodec on CPU.
@@ -98,7 +207,7 @@ class TorchCodecCPUDecoder:
         path
             Path to the video file.
         num_frames
-            Number of frames to sample uniformly.
+            Number of frames to sample.
 
         Returns
         -------
@@ -107,11 +216,10 @@ class TorchCodecCPUDecoder:
         """
         from torchcodec.decoders import VideoDecoder as TVideoDecoder
 
-        from lpcv.datasets.utils import uniform_temporal_indices
-
         decoder = TVideoDecoder(str(path), device="cpu", dimension_order="NCHW")
         total = decoder.metadata.num_frames or 1
-        indices = uniform_temporal_indices(total, num_frames)
+        original_fps = float(decoder.metadata.average_fps or 30)
+        indices = _select_indices(total, num_frames, original_fps, self.target_fps)
         return decoder.get_frames_at(indices).data.float()
 
 
@@ -134,11 +242,21 @@ class TorchCodecNVDECDecoder:
     num_gpus
         Number of GPUs to distribute across.  When *None*, all decoding
         happens on *device*.
+    target_fps
+        When ``None`` (default), frames are selected via uniform index
+        spacing.  When set to a positive integer, FPS-based resampling is
+        used instead.
     """
 
-    def __init__(self, device: str = "cuda", num_gpus: int | None = None) -> None:
+    def __init__(
+        self,
+        device: str = "cuda",
+        num_gpus: int | None = None,
+        target_fps: int | None = None,
+    ) -> None:
         self.device = device
         self.num_gpus = num_gpus
+        self.target_fps = target_fps
 
     def _resolve_device(self) -> str:
         """Return the CUDA device string for the current context.
@@ -167,7 +285,7 @@ class TorchCodecNVDECDecoder:
         path
             Path to the video file.
         num_frames
-            Number of frames to sample uniformly.
+            Number of frames to sample.
 
         Returns
         -------
@@ -177,13 +295,12 @@ class TorchCodecNVDECDecoder:
         from torchcodec.decoders import VideoDecoder as TVideoDecoder
         from torchcodec.decoders import set_cuda_backend
 
-        from lpcv.datasets.utils import uniform_temporal_indices
-
         device = self._resolve_device()
         with set_cuda_backend("beta"):
             decoder = TVideoDecoder(str(path), device=device, dimension_order="NCHW")
             total = decoder.metadata.num_frames or 1
-            indices = uniform_temporal_indices(total, num_frames)
+            original_fps = float(decoder.metadata.average_fps or 30)
+            indices = _select_indices(total, num_frames, original_fps, self.target_fps)
             return decoder.get_frames_at(indices).data.float()
 
 
@@ -206,6 +323,8 @@ def get_decoder(
         One of ``"pyav"``, ``"torchcodec-cpu"``, ``"torchcodec-nvdec"``.
     **kwargs
         Extra keyword arguments forwarded to the decoder constructor.
+        All decoders accept ``target_fps`` to switch from uniform index
+        sampling to FPS-based resampling.
 
     Returns
     -------

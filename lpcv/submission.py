@@ -3,32 +3,39 @@
 Provides:
 
 - :func:`preprocess_dataset` — decode videos to ``.npy`` tensors + ``manifest.jsonl``.
-- :func:`export_onnx` — trace a trained VideoMAE checkpoint to ONNX.
+- :func:`export_onnx` — wrap model with competition adapter and export to ONNX.
 - :func:`compile_on_hub` — compile an ONNX model on Qualcomm AI Hub.
 - :func:`run_inference_on_hub` — upload tensors and run on-device inference.
+- :func:`register_model` — register a new model type for the submission pipeline.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import onnx
 import torch
+import torchvision.transforms as T
 from loguru import logger
 from tqdm import tqdm
 
-from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
-
 if TYPE_CHECKING:
-    from lpcv.datasets.decoder import VideoDecoder
+    from collections.abc import Callable
 
 DEFAULT_NUM_FRAMES = 16
 """Default number of frames to sample per video clip."""
 
-DEFAULT_SPATIAL_SIZE = 224
-"""Default spatial resolution for VideoMAE input."""
+COMPETITION_SPATIAL_SIZE = 112
+"""Spatial resolution of the competition's fixed input pipeline."""
+
+COMPETITION_RESIZE_HW = (128, 171)
+"""Resize target before center crop in the competition pipeline."""
 
 DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"
 """Default Qualcomm AI Hub device for compilation and inference."""
@@ -36,15 +43,128 @@ DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"
 CHUNK_SIZE = 538
 """Maximum number of samples per AI Hub inference job (stays under 2 GB flatbuffer limit)."""
 
+FRAME_RATE = 4
+"""Frame rate used by the competition's VideoClips-based preprocessing."""
+
+
+@dataclass
+class SubmissionModelConfig:
+    """Describes how a model integrates with the competition submission pipeline.
+
+    Parameters
+    ----------
+    spatial_size
+        Spatial resolution expected by the model (e.g. 224 for VideoMAE).
+    mean
+        Per-channel mean for normalisation (length 3).
+    std
+        Per-channel standard deviation for normalisation (length 3).
+    input_layout
+        Expected tensor layout: ``"BTCHW"`` or ``"BCTHW"``.
+    input_key
+        Keyword argument name for the model's forward method (e.g. ``"pixel_values"``).
+    output_extractor
+        Callable that extracts logits from the model's raw output.
+        Defaults to ``lambda out: out.logits``.
+    loader
+        Callable ``(path: str) -> torch.nn.Module`` that loads a checkpoint.
+    """
+
+    spatial_size: int
+    mean: list[float]
+    std: list[float]
+    input_layout: str = "BTCHW"
+    input_key: str = "pixel_values"
+    output_extractor: Callable[..., torch.Tensor] = field(
+        default_factory=lambda: lambda out: out.logits
+    )
+    loader: Callable[[str], torch.nn.Module] | None = None
+
+
+_MODEL_REGISTRY: dict[str, SubmissionModelConfig] = {}
+"""Registry of model configs by name."""
+
+
+def register_model(name: str, config: SubmissionModelConfig) -> None:
+    """Register a model configuration for the submission pipeline.
+
+    Parameters
+    ----------
+    name
+        Short name used to select the model (e.g. ``"videomae"``).
+    config
+        Configuration describing how to load and run the model.
+    """
+    _MODEL_REGISTRY[name] = config
+
+
+def get_model_config(name: str) -> SubmissionModelConfig:
+    """Retrieve a registered model configuration by name.
+
+    Parameters
+    ----------
+    name
+        Registered model name.
+
+    Returns
+    -------
+    SubmissionModelConfig
+        The configuration for the requested model.
+
+    Raises
+    ------
+    KeyError
+        If the model name is not registered.
+    """
+    if name not in _MODEL_REGISTRY:
+        available = ", ".join(sorted(_MODEL_REGISTRY)) or "(none)"
+        raise KeyError(f"Unknown model type {name!r}. Available: {available}")
+    return _MODEL_REGISTRY[name]
+
+
+def _register_builtins() -> None:
+    """Register built-in model types."""
+    from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
+
+    def _load_videomae(path: str) -> torch.nn.Module:
+        from transformers import VideoMAEForVideoClassification
+
+        return VideoMAEForVideoClassification.from_pretrained(path)
+
+    register_model(
+        "videomae",
+        SubmissionModelConfig(
+            spatial_size=224,
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+            input_layout="BTCHW",
+            input_key="pixel_values",
+            output_extractor=lambda out: out.logits,
+            loader=_load_videomae,
+        ),
+    )
+
+
+_register_builtins()
+
 
 def preprocess_dataset(
     data_dir: str | Path,
     output_dir: str | Path,
-    decoder: VideoDecoder,
     num_frames: int = DEFAULT_NUM_FRAMES,
-    spatial_size: int = DEFAULT_SPATIAL_SIZE,
+    decoder_name: str = "pyav",
+    target_fps: int = FRAME_RATE,
 ) -> Path:
-    """Decode videos to ``(1, C, T, H, W)`` ``.npy`` tensors and write a manifest.
+    """Decode videos to ``(1, 3, T, 112, 112)`` ``.npy`` tensors and write a manifest.
+
+    Replicates the competition's exact preprocessing pipeline so that locally
+    saved tensors match what the organiser's evaluation server produces:
+
+    1. Decode frames, resample to *target_fps* with dynamic adjustment
+       for short videos (matching the patched ``VideoClips`` behaviour).
+    2. ``ConvertImageDtype(float32)`` → ``Resize(128, 171)``
+       → ``Normalize(R2+1D mean/std)`` → ``CenterCrop(112, 112)``.
+    3. Permute to ``(C, T, H, W)`` and add batch dim → ``(1, 3, T, 112, 112)``.
 
     Parameters
     ----------
@@ -52,19 +172,27 @@ def preprocess_dataset(
         Root of the videofolder dataset (expects ``val/<class>/*.mp4``).
     output_dir
         Directory to write ``.npy`` files and ``manifest.jsonl``.
-    decoder
-        Video decoder instance used to extract frames.
     num_frames
-        Number of frames to uniformly sample per clip.
-    spatial_size
-        Target spatial size (height and width) after resizing.
+        Number of frames per clip (must match the competition setting, default 16).
+    decoder_name
+        Decoder backend name (e.g. ``"pyav"``, ``"torchcodec-cpu"``).
+    target_fps
+        Target FPS for frame resampling.  Passed to the decoder.
 
     Returns
     -------
     Path
         Path to the written ``manifest.jsonl``.
     """
-    from lpcv.datasets.info import TARGET_LABEL_FILE_NAME, VIDEO_EXTENSIONS
+    from lpcv.datasets.decoder import get_decoder
+    from lpcv.datasets.info import (
+        R2PLUS1D_MEAN,
+        R2PLUS1D_STD,
+        TARGET_LABEL_FILE_NAME,
+        VIDEO_EXTENSIONS,
+    )
+
+    decoder = get_decoder(decoder_name, target_fps=target_fps)
 
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
@@ -92,22 +220,28 @@ def preprocess_dataset(
     if not video_entries:
         raise FileNotFoundError(f"No videos found in {val_dir}")
 
-    manifest_path = output_dir / "manifest.jsonl"
-    mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
-    std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
+    spatial = T.Compose(
+        [
+            T.ConvertImageDtype(torch.float32),
+            T.Resize(COMPETITION_RESIZE_HW, antialias=False),
+            T.Normalize(mean=R2PLUS1D_MEAN, std=R2PLUS1D_STD),
+            T.CenterCrop(COMPETITION_SPATIAL_SIZE),
+        ]
+    )
 
+    manifest_path = output_dir / "manifest.jsonl"
     logger.info(f"Preprocessing {len(video_entries)} videos → {output_dir}")
 
     with open(manifest_path, "w", encoding="utf-8") as mf:
         for video_path, label in tqdm(video_entries, desc="Preprocessing", unit="video"):
-            frames = decoder.decode(video_path, num_frames)
+            try:
+                clip = decoder.decode(video_path, num_frames)
+            except ValueError:
+                logger.warning(f"Skipping {video_path}: not enough frames")
+                continue
 
-            frames = frames.float() / 255.0
-            frames = torch.nn.functional.interpolate(
-                frames, size=(spatial_size, spatial_size), mode="bilinear", align_corners=False
-            )
-            frames = (frames - mean) / std
-            tensor = frames.unsqueeze(0)
+            clip = spatial(clip)
+            tensor = clip.permute(1, 0, 2, 3).unsqueeze(0)
 
             rel = video_path.relative_to(val_dir)
             npy_rel = rel.with_suffix(".npy")
@@ -128,70 +262,228 @@ def preprocess_dataset(
     return manifest_path
 
 
+class CompetitionAdapter(torch.nn.Module):
+    """Adapter that converts competition input to any video model's expected format.
+
+    The competition feeds ``(B, C, T, H, W)`` tensors at 112x112, normalized
+    with R(2+1)D mean/std.  Different models expect different spatial sizes,
+    normalization stats, and input layouts.
+
+    This wrapper performs (all in-graph for ONNX export):
+
+    1. **Denormalize** — undo the R(2+1)D mean/std.
+    2. **Resize** — bilinear interpolate from 112x112 to the model's spatial size.
+    3. **Renormalize** — apply the model's expected mean/std.
+    4. **Permute** — rearrange to the model's expected input layout.
+    5. **Forward** — through the inner model.
+    """
+
+    src_mean: torch.Tensor
+    src_std: torch.Tensor
+    dst_mean: torch.Tensor
+    dst_std: torch.Tensor
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        src_mean: list[float],
+        src_std: list[float],
+        dst_mean: list[float],
+        dst_std: list[float],
+        target_spatial: int = 224,
+        input_layout: str = "BTCHW",
+        input_key: str = "pixel_values",
+        output_extractor: Callable[..., torch.Tensor] | None = None,
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.target_spatial = target_spatial
+        self.input_layout = input_layout
+        self.input_key = input_key
+        self.output_extractor = output_extractor or (lambda out: out.logits)
+        self.register_buffer("src_mean", torch.tensor(src_mean).view(1, 3, 1, 1, 1))
+        self.register_buffer("src_std", torch.tensor(src_std).view(1, 3, 1, 1, 1))
+        self.register_buffer("dst_mean", torch.tensor(dst_mean).view(1, 3, 1, 1, 1))
+        self.register_buffer("dst_std", torch.tensor(dst_std).view(1, 3, 1, 1, 1))
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Adapt competition input and forward through the wrapped model.
+
+        Parameters
+        ----------
+        pixel_values
+            Tensor of shape ``(B, C, T, H, W)`` — R(2+1)D normalized, 112x112.
+
+        Returns
+        -------
+        torch.Tensor
+            Classification logits.
+        """
+        x = pixel_values * self.src_std + self.src_mean
+
+        b, c, t, h, w = x.shape
+        x = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        x = torch.nn.functional.interpolate(
+            x,
+            size=(self.target_spatial, self.target_spatial),
+            mode="bilinear",
+            align_corners=False,
+        )
+        x = x.reshape(b, t, c, self.target_spatial, self.target_spatial)
+        x = x.permute(0, 2, 1, 3, 4)
+
+        x = (x - self.dst_mean) / self.dst_std
+
+        if self.input_layout == "BTCHW":
+            x = x.permute(0, 2, 1, 3, 4)
+
+        return self.output_extractor(self.model(**{self.input_key: x}))
+
+    @classmethod
+    def from_config(
+        cls,
+        model: torch.nn.Module,
+        config: SubmissionModelConfig,
+        src_mean: list[float] | None = None,
+        src_std: list[float] | None = None,
+    ) -> CompetitionAdapter:
+        """Create an adapter from a :class:`SubmissionModelConfig`.
+
+        Parameters
+        ----------
+        model
+            The inner model to wrap.
+        config
+            Model configuration from the registry.
+        src_mean
+            Source normalization mean (competition pipeline). If ``None``,
+            uses R(2+1)D mean from ``lpcv.datasets.info``.
+        src_std
+            Source normalization std (competition pipeline). If ``None``,
+            uses R(2+1)D std from ``lpcv.datasets.info``.
+
+        Returns
+        -------
+        CompetitionAdapter
+            Configured adapter instance.
+        """
+        from lpcv.datasets.info import R2PLUS1D_MEAN, R2PLUS1D_STD
+
+        return cls(
+            model=model,
+            src_mean=src_mean or R2PLUS1D_MEAN,
+            src_std=src_std or R2PLUS1D_STD,
+            dst_mean=config.mean,
+            dst_std=config.std,
+            target_spatial=config.spatial_size,
+            input_layout=config.input_layout,
+            input_key=config.input_key,
+            output_extractor=config.output_extractor,
+        )
+
+
 def export_onnx(
     model_path: str | Path,
     output_path: str | Path,
+    model_type: str = "videomae",
     num_frames: int = DEFAULT_NUM_FRAMES,
-    spatial_size: int = DEFAULT_SPATIAL_SIZE,
-    opset_version: int = 17,
+    opset_version: int = 18,
 ) -> Path:
-    """Trace a trained VideoMAE checkpoint and export to ONNX.
+    """Wrap a trained checkpoint with the competition adapter and export to ONNX.
+
+    The exported model accepts the competition's fixed input shape
+    ``(1, 3, T, 112, 112)`` (R(2+1)D-normalised) and internally
+    denormalises, resizes to the model's expected spatial resolution,
+    re-normalises, permutes, then forwards through the model.
 
     Parameters
     ----------
     model_path
-        Path to a HuggingFace-saved VideoMAE checkpoint directory.
+        Path to a saved model checkpoint directory.
     output_path
         File path for the exported ``.onnx`` model.
+    model_type
+        Registered model name (e.g. ``"videomae"``).
     num_frames
         Temporal dimension of the input tensor.
-    spatial_size
-        Spatial height/width of the input tensor.
     opset_version
         ONNX opset version.
 
     Returns
     -------
     Path
-        Path to the written ONNX file.
-    """
-    from transformers import VideoMAEForVideoClassification
+        Path to the ONNX model directory (AI Hub format).
 
+    Raises
+    ------
+    KeyError
+        If *model_type* is not registered.
+    ValueError
+        If the model config has no loader.
+    """
     model_path = Path(model_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Loading model from {model_path}")
-    model = VideoMAEForVideoClassification.from_pretrained(str(model_path))
-    model.eval()
+    config = get_model_config(model_type)
+    if config.loader is None:
+        raise ValueError(
+            f"Model type {model_type!r} has no loader. "
+            f"Register one via register_model() with a loader callback."
+        )
 
-    dummy_input = torch.randn(1, num_frames, 3, spatial_size, spatial_size)
+    logger.info(f"Loading {model_type} model from {model_path}")
+    base_model = config.loader(str(model_path))
+    wrapped = CompetitionAdapter.from_config(base_model, config)
+    wrapped.eval()
+
+    dummy_input = torch.randn(1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
 
     logger.info(f"Exporting ONNX (opset {opset_version}) → {output_path}")
-    torch.onnx.export(
-        model,
-        (dummy_input,),
-        str(output_path),
-        input_names=["pixel_values"],
-        output_names=["logits"],
-        dynamic_axes={
-            "pixel_values": {0: "batch_size"},
-            "logits": {0: "batch_size"},
-        },
-        opset_version=opset_version,
+
+    onnx_dir = output_path.parent / f"{output_path.stem}.onnx"
+    if onnx_dir.exists():
+        shutil.rmtree(onnx_dir)
+    onnx_dir.mkdir(parents=True)
+
+    inner_onnx = onnx_dir / f"{output_path.stem}.onnx"
+    data_file = f"{output_path.stem}.data"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_onnx = Path(tmp) / "model.onnx"
+        torch.onnx.export(
+            wrapped,
+            (dummy_input,),
+            str(tmp_onnx),
+            input_names=["pixel_values"],
+            output_names=["logits"],
+            dynamic_axes={
+                "pixel_values": {0: "batch_size"},
+                "logits": {0: "batch_size"},
+            },
+            opset_version=opset_version,
+        )
+        model_proto = onnx.load(str(tmp_onnx))
+
+    onnx.save(
+        model_proto,
+        str(inner_onnx),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=data_file,
     )
 
-    logger.info(f"ONNX model saved to {output_path}")
-    return output_path
+    logger.info(f"ONNX model directory saved to {onnx_dir}")
+    return onnx_dir
 
 
 def compile_on_hub(
     model_path: str | Path,
     device_name: str = DEFAULT_DEVICE_NAME,
     num_frames: int = DEFAULT_NUM_FRAMES,
-    spatial_size: int = DEFAULT_SPATIAL_SIZE,
     output_dir: str | Path | None = None,
-) -> Path | None:
+    download: bool = True,
+) -> Path | str:
     """Compile an ONNX model on Qualcomm AI Hub and download the binary.
 
     Parameters
@@ -202,28 +494,29 @@ def compile_on_hub(
         AI Hub device name (e.g. ``"Dragonwing IQ-9075 EVK"``).
     num_frames
         Temporal dimension for input spec.
-    spatial_size
-        Spatial height/width for input spec.
     output_dir
         Directory to save the compiled ``.bin``. Defaults to ``./export_assets/``.
+    download
+        If ``True`` (default), download the compiled binary locally.
+        If ``False``, skip the download and return the AI Hub model ID instead.
 
     Returns
     -------
-    Path or None
-        Path to the downloaded compiled binary, or ``None`` if download was skipped.
+    Path or str
+        Path to the downloaded compiled binary when *download* is ``True``,
+        or the AI Hub model ID string when *download* is ``False``.
     """
-    import qai_hub  # type: ignore[import-untyped]
+    import qai_hub
 
     model_path = Path(model_path)
-    output_dir = Path(output_dir) if output_dir else Path.cwd() / "export_assets"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     device = qai_hub.Device(device_name)
+    input_shape = (1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
 
     logger.info(f"Uploading {model_path.name} and submitting compile job on {device_name}")
     compile_job = qai_hub.submit_compile_job(
         model=str(model_path),
-        input_specs={"pixel_values": ((1, num_frames, 3, spatial_size, spatial_size), "float32")},
+        input_specs={"pixel_values": (input_shape, "float32")},
         device=device,
         options="--target_runtime qnn_context_binary",
         name=model_path.stem,
@@ -234,6 +527,15 @@ def compile_on_hub(
 
     target_model = compile_job.get_target_model()
     assert target_model is not None
+
+    model_id: str = target_model.model_id
+    logger.info(f"Compiled model ID: {model_id}")
+
+    if not download:
+        return model_id
+
+    output_dir = Path(output_dir) if output_dir else Path.cwd() / "export_assets"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     bin_path = Path(target_model.download(str(output_dir / f"{model_path.stem}.bin")))
     logger.info(f"Compiled binary saved to {bin_path}")
@@ -247,13 +549,14 @@ def run_inference_on_hub(
     output_h5: str | Path = "dataset-export.h5",
     device_name: str = DEFAULT_DEVICE_NAME,
     channel_last: bool = False,
+    hub_model_id: str | None = None,
 ) -> Path:
     """Upload preprocessed tensors and run on-device inference via AI Hub.
 
     Parameters
     ----------
     compiled_model_path
-        Path to the compiled ``.bin`` model.
+        Path to the compiled ``.bin`` model. Ignored when *hub_model_id* is provided.
     tensor_dir
         Directory containing ``.npy`` tensors (class-subfolder layout matching the manifest).
     manifest_path
@@ -264,6 +567,9 @@ def run_inference_on_hub(
         AI Hub device name.
     channel_last
         If ``True``, transpose tensors from ``NCTHW`` to ``NTHWC`` before upload.
+    hub_model_id
+        If provided, reuse an already-uploaded AI Hub model instead of uploading
+        *compiled_model_path* again.
 
     Returns
     -------
@@ -271,7 +577,7 @@ def run_inference_on_hub(
         Path to the written HDF5 logits file.
     """
     import h5py
-    import qai_hub  # type: ignore[import-untyped]
+    import qai_hub
 
     compiled_model_path = Path(compiled_model_path)
     tensor_dir = Path(tensor_dir)
@@ -296,8 +602,13 @@ def run_inference_on_hub(
         tensors.append(x)
 
     device = qai_hub.Device(device_name)
-    logger.info(f"Uploading compiled model: {compiled_model_path.name}")
-    target_model = qai_hub.upload_model(str(compiled_model_path))
+
+    if hub_model_id is not None:
+        logger.info(f"Reusing AI Hub model: {hub_model_id}")
+        target_model = qai_hub.get_model(hub_model_id)
+    else:
+        logger.info(f"Uploading compiled model: {compiled_model_path.name}")
+        target_model = qai_hub.upload_model(str(compiled_model_path))
 
     all_jobs = []
     input_name = "pixel_values"

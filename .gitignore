@@ -12,6 +12,7 @@ wheels/
 
 # Data
 data/
+result/
 *.mp4
 *.npy
 *.h5

@@ -14,3 +14,9 @@ IMAGENET_MEAN: list[float] = [0.485, 0.456, 0.406]
 
 IMAGENET_STD: list[float] = [0.229, 0.224, 0.225]
 """ImageNet per-channel standard deviation used for normalisation."""
+
+R2PLUS1D_MEAN: list[float] = [0.43216, 0.394666, 0.37645]
+"""R(2+1)D per-channel mean used by the LPCVC competition preprocessing."""
+
+R2PLUS1D_STD: list[float] = [0.22803, 0.22145, 0.216989]
+"""R(2+1)D per-channel standard deviation used by the LPCVC competition preprocessing."""

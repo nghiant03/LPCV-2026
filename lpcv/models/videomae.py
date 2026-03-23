@@ -18,7 +18,6 @@ from transformers import (
     Trainer,
     TrainingArguments,
     VideoMAEForVideoClassification,
-    VideoMAEImageProcessor,
 )
 
 if TYPE_CHECKING:
@@ -36,8 +35,6 @@ class VideoMAETrainerConfig:
         HuggingFace model identifier or local path.
     num_frames
         Number of frames sampled per video.
-    image_size
-        Spatial resolution (height = width) after preprocessing.
     output_dir
         Directory for checkpoints and the final saved model.
     num_train_epochs
@@ -102,7 +99,6 @@ class VideoMAETrainerConfig:
 
     model_name: str = "MCG-NJU/videomae-base"
     num_frames: int = 16
-    image_size: int = 224
     output_dir: str = "output"
     num_train_epochs: int = 15
     per_device_train_batch_size: int = 8
@@ -178,14 +174,6 @@ class VideoMAEModelTrainer:
         logger.info(
             f"Initializing VideoMAE trainer: model={config.model_name}, "
             f"labels={self.num_labels}, epochs={config.num_train_epochs}"
-        )
-
-        self.processor = VideoMAEImageProcessor.from_pretrained(
-            config.model_name,
-            do_resize=True,
-            size={"shortest_edge": config.image_size},
-            do_center_crop=True,
-            crop_size={"height": config.image_size, "width": config.image_size},
         )
 
         self.model = VideoMAEForVideoClassification.from_pretrained(
@@ -342,7 +330,6 @@ class VideoMAEModelTrainer:
 
         output_path = Path(self.config.output_dir) / "best_model"
         trainer.save_model(str(output_path))
-        self.processor.save_pretrained(str(output_path))
 
         logger.info(f"Model saved to {output_path}")
         return output_path

@@ -151,7 +151,11 @@ def evaluate_h5(
         If the H5 file has more results than the manifest has labels.
     """
     with open(class_map_path, encoding="utf-8") as f:
-        class_to_idx: dict[str, int] = json.load(f)
+        raw = json.load(f)
+    if isinstance(raw, list):
+        class_to_idx: dict[str, int] = {cls: i for i, cls in enumerate(raw)}
+    else:
+        class_to_idx = raw
     idx_to_class = {i: cls for cls, i in class_to_idx.items()}
 
     raw_logits = load_logits_h5(h5_path)

@@ -62,7 +62,8 @@ lpcv/
 │   ├── main.py            # Typer app root, mounts sub-commands
 │   ├── data.py            # CLI: convert raw QEVD to videofolder
 │   ├── evaluate.py        # CLI: evaluate model or H5 logits
-│   └── train.py           # CLI: train videomae
+│   ├── train.py           # CLI: train videomae / r2plus1d (generic flow)
+│   └── submit.py          # CLI: preprocess, export, compile, infer on Qualcomm AI Hub
 ├── datasets/
 │   ├── __init__.py
 │   ├── info.py            # Constants: video extensions, split dirs, label file name
@@ -71,15 +72,16 @@ lpcv/
 │   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder layout
 │   └── utils.py           # Video probing, remuxing, dimension checks, frame subsampling
 └── models/
-    ├── __init__.py
-    └── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
+    ├── __init__.py         # ModelSpec registry + get_model_spec() / register_model()
+    ├── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
+    └── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
 ```
 
 ## Architecture & Patterns
 
 ### CLI Layer (`lpcv/cli/`)
 
-- Uses **Typer** with sub-app pattern: `main.py` mounts `data`, `train`, `evaluate` sub-commands.
+- Uses **Typer** with sub-app pattern: `main.py` mounts `data`, `train`, `evaluate`, `submit` sub-commands.
 - Heavy imports (torch, transformers, datasets) are deferred inside command functions to keep CLI startup fast.
 - All CLI parameters use `Annotated[T, typer.Option/Argument]` style.
 
@@ -107,19 +109,76 @@ Two-stage pipeline:
 - `get(name)` retrieves a registered transform class by name.
 - All transforms operate on `torch.Tensor` with shape `(T, C, H, W)`.
 - `VideoTransformCallable` wraps a `Compose` pipeline for use with HF `set_transform`.
-- Four presets:
-  - `TRAIN_PRESET` — temporal subsample + scale + normalize + random augmentation (crop/flip/scale).
-  - `VAL_PRESET` — temporal subsample + scale + normalize + deterministic resize.
-  - `DECODE_TRAIN_PRESET` — same as `TRAIN_PRESET` but without temporal subsample (decoder handles it).
-  - `DECODE_VAL_PRESET` — same as `VAL_PRESET` but without temporal subsample.
+- Default presets match the LPCVC reference solution (R2+1D norm, 128×171 resize, 112×112 crop):
+  - `TRAIN_PRESET` — ScalePixels → Resize(128,171) → RandomHorizontalFlip → Normalize(R2+1D) → RandomCrop(112).
+  - `VAL_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112).
+- VideoMAE presets (ImageNet norm, 224×224):
+  - `VIDEOMAE_TRAIN_PRESET` — ScalePixels → Normalize(ImageNet) → RandomShortSideScale → RandomCrop(224) → RandomHorizontalFlip.
+  - `VIDEOMAE_VAL_PRESET` — ScalePixels → Normalize(ImageNet) → Resize(224).
+- `save_val_transform_config()` / `load_val_transform_config()` — persist val transform config as JSON alongside model checkpoints.
+- `extract_adapter_steps()` — diffs a saved val config against the competition pipeline; returns only the extra steps needed for the ONNX adapter.
 - Registered transforms: `FromVideo`, `UniformTemporalSubsample`, `ScalePixels`, `Normalize`, `RandomShortSideScale`, `ShortSideScale`, `RandomCrop`, `CenterCrop`, `RandomHorizontalFlip`, `Resize`.
+
+### Model Registry (`lpcv/models/__init__.py`)
+
+- `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, and output extractor for each model.
+- `register_model(name, spec)` / `get_model_spec(name)` / `list_models()` — lightweight registry.
+- Built-in registrations: `"videomae"`, `"r2plus1d"`.
+- CLI `train.py` uses the registry via `_run_training()` — a single generic flow that loads the spec, builds datasets with the model's presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
 
 - `VideoMAETrainerConfig`: dataclass holding all training hyperparameters (~30 fields).
 - `VideoMAEModelTrainer`: wraps HuggingFace `Trainer`. Handles model loading, freeze strategies (`none`/`backbone`/`partial`), custom collation via `_collate_fn()`, and top-1/top-5 metric computation via `_compute_metrics()`.
+- Accepts `val_transform_config` and saves it as `val_transform.json` alongside the model.
 - Label metadata is read from the dataset's `label` feature (ClassLabel).
 - Multi-GPU via `torch.distributed.launcher.api.elastic_launch` (configured in CLI).
+
+### Model Training (`lpcv/models/r2plus1d.py`)
+
+- `R2Plus1DTrainerConfig`: dataclass with defaults optimised for few-epoch fine-tuning (2 epochs, cosine LR, label smoothing 0.1, partial freeze).
+- `R2Plus1DForClassification`: wraps torchvision `r2plus1d_18` with HF Trainer-compatible interface (`pixel_values`/`labels` kwargs, `.logits` output).
+- `R2Plus1DModelTrainer`: same pattern as VideoMAE — HF `Trainer` wrapper with freeze strategies (`none`/`backbone`/`partial`), label smoothing, and `val_transform.json` saving.
+- `save_pretrained()` / `load_pretrained()` — custom checkpoint format (`model.pt` with state dict + num_classes).
+
+### Submission Pipeline (`lpcv/submission.py`)
+
+- `preprocess_dataset()`: decodes videos to `(1,3,T,112,112)` `.npy` tensors using competition's fixed R(2+1)D normalization pipeline. Writes a `manifest.jsonl` mapping tensor paths to labels.
+- `CompetitionAdapter`: `nn.Module` that adapts competition input (BCTHW, 112×112, R2+1D norm) to any model's expected format. Handles re-normalization, resize, and layout permutation in-graph. Auto-built from `val_transform.json` via `CompetitionAdapter.from_saved_config()` — no hardcoded registry needed.
+- `export_onnx()`: loads model via `ModelSpec.loader`, wraps with `CompetitionAdapter`, exports ONNX with external data.
+- `compile_on_hub()`: uploads ONNX to Qualcomm AI Hub, submits compile job targeting `qnn_context_binary`, downloads `.bin`.
+- `run_inference_on_hub()`: loads tensors from manifest, uploads in chunks of 538 (≤2GB flatbuffer limit), submits inference jobs, collects logits into HDF5.
+- Key constants: `DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"`, `CHUNK_SIZE = 538`, `FRAME_RATE = 4`, `COMPETITION_SPATIAL_SIZE = 112`.
+
+### Submission CLI (`lpcv/cli/submit.py`)
+
+Four subcommands under `uv run lpcv submit`:
+
+| Command | Usage | Description |
+|---|---|---|
+| `preprocess` | `<data_dir> <output_dir>` | Decode videos → `.npy` tensors + `manifest.jsonl` |
+| `export` | `<model_path> -o model.onnx` | Export checkpoint to ONNX with competition adapter |
+| `compile` | `<onnx_path> -o export_assets/` | Compile ONNX on Qualcomm AI Hub → `.bin` |
+| `infer` | `<tensor_dir> -c <compiled.bin>` | Upload tensors, run on-device inference on AI Hub |
+
+Typical end-to-end submission workflow:
+
+```sh
+# 1. Preprocess validation videos into tensors
+uv run lpcv submit preprocess ./data/qevd ./tensors
+
+# 2. Export trained model to ONNX (auto-wraps with CompetitionAdapter)
+uv run lpcv submit export ./checkpoints/best -o model.onnx
+
+# 3. Compile ONNX for Qualcomm hardware
+uv run lpcv submit compile model.onnx -o export_assets/
+
+# 4. Run on-device inference and collect logits
+uv run lpcv submit infer ./tensors -c export_assets/compiled.bin
+
+# 5. Evaluate logits against ground truth
+uv run lpcv evaluate h5 ./inference_results.h5 ./tensors/manifest.jsonl ./class_map.json
+```
 
 ### Evaluation (`lpcv/evaluation.py`)
 

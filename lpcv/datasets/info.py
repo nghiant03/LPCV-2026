@@ -20,3 +20,9 @@ R2PLUS1D_MEAN: list[float] = [0.43216, 0.394666, 0.37645]
 
 R2PLUS1D_STD: list[float] = [0.22803, 0.22145, 0.216989]
 """R(2+1)D per-channel standard deviation used by the LPCVC competition preprocessing."""
+
+X3D_MEAN: list[float] = [0.45, 0.45, 0.45]
+"""X3D per-channel mean (Kinetics-400 convention)."""
+
+X3D_STD: list[float] = [0.225, 0.225, 0.225]
+"""X3D per-channel standard deviation (Kinetics-400 convention)."""

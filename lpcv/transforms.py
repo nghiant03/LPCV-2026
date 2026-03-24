@@ -372,17 +372,55 @@ COMPETITION_PRESET: list[dict[str, Any]] = [
 # Default presets (match LPCVC reference solution)
 # ---------------------------------------------------------------------------
 
-TRAIN_PRESET: list[dict[str, Any]] = [
-    {"name": "ScalePixels"},
-    {"name": "Resize", "height": 128, "width": 171},
-    {"name": "RandomHorizontalFlip", "p": 0.5},
-    {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
-    {"name": "RandomCrop", "height": 112},
-]
-"""Default training preset — matches the LPCVC reference solution."""
 
-VAL_PRESET: list[dict[str, Any]] = COMPETITION_PRESET
-"""Default validation preset — identical to the competition pipeline."""
+def make_presets(
+    mean: list[float] | None = None,
+    std: list[float] | None = None,
+    resize_height: int = 128,
+    resize_width: int = 171,
+    crop_size: int = 112,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build train/val presets with customisable normalisation and spatial size.
+
+    Parameters
+    ----------
+    mean
+        Per-channel mean.  Defaults to R(2+1)D mean (competition default).
+    std
+        Per-channel std.  Defaults to R(2+1)D std (competition default).
+    resize_height
+        Height to resize frames to before cropping.
+    resize_width
+        Width to resize frames to before cropping.
+    crop_size
+        Spatial crop size (square).
+
+    Returns
+    -------
+    tuple[list[dict[str, Any]], list[dict[str, Any]]]
+        ``(train_preset, val_preset)`` step dicts.
+    """
+    mean = mean if mean is not None else R2PLUS1D_MEAN
+    std = std if std is not None else R2PLUS1D_STD
+
+    train: list[dict[str, Any]] = [
+        {"name": "ScalePixels"},
+        {"name": "Resize", "height": resize_height, "width": resize_width},
+        {"name": "RandomHorizontalFlip", "p": 0.5},
+        {"name": "Normalize", "mean": mean, "std": std},
+        {"name": "RandomCrop", "height": crop_size},
+    ]
+    val: list[dict[str, Any]] = [
+        {"name": "ScalePixels"},
+        {"name": "Resize", "height": resize_height, "width": resize_width},
+        {"name": "Normalize", "mean": mean, "std": std},
+        {"name": "CenterCrop", "height": crop_size},
+    ]
+    return train, val
+
+
+TRAIN_PRESET, VAL_PRESET = make_presets()
+"""Default presets — R(2+1)D normalisation, matching the LPCVC reference solution."""
 
 
 # ---------------------------------------------------------------------------

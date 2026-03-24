@@ -62,19 +62,21 @@ lpcv/
 │   ├── main.py            # Typer app root, mounts sub-commands
 │   ├── data.py            # CLI: convert raw QEVD to videofolder
 │   ├── evaluate.py        # CLI: evaluate model or H5 logits
-│   ├── train.py           # CLI: train videomae / r2plus1d (generic flow)
+│   ├── train.py           # CLI: train videomae / r2plus1d / x3d (generic flow)
 │   └── submit.py          # CLI: preprocess, export, compile, infer on Qualcomm AI Hub
 ├── datasets/
 │   ├── __init__.py
-│   ├── info.py            # Constants: video extensions, split dirs, label file name
+│   ├── info.py            # Constants: video extensions, split dirs, label file name, norm stats
 │   ├── base.py            # VideoDataset (PyTorch Dataset) + load_video_dataset()
 │   ├── decoder.py         # VideoDecoder protocol + PyAV/TorchCodec implementations
 │   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder layout
 │   └── utils.py           # Video probing, remuxing, dimension checks, frame subsampling
 └── models/
     ├── __init__.py         # ModelSpec registry + get_model_spec() / register_model()
+    ├── base.py             # ModelOutput, BaseForClassification, BaseModelTrainer (shared)
     ├── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
-    └── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
+    ├── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
+    └── x3d.py              # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
 ```
 
 ## Architecture & Patterns
@@ -113,6 +115,7 @@ Two-stage pipeline:
   - `COMPETITION_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112). Single source of truth for the competition's fixed pipeline; used by `preprocess_dataset()` and `extract_adapter_steps()`.
   - `TRAIN_PRESET` — ScalePixels → Resize(128,171) → RandomHorizontalFlip → Normalize(R2+1D) → RandomCrop(112).
   - `VAL_PRESET` — alias for `COMPETITION_PRESET`.
+- `make_x3d_presets(crop_size)` — dynamically builds X3D train/val presets (X3D norm, short-side scale, crop) for a given spatial size.
 - `save_val_transform_config()` / `load_val_transform_config()` — persist val transform config as JSON alongside model checkpoints.
 - `extract_adapter_steps()` — diffs a saved val config against the competition pipeline; returns only the extra steps needed for the ONNX adapter.
 - Registered transforms: `FromVideo`, `UniformTemporalSubsample`, `ScalePixels`, `Normalize`, `RandomShortSideScale`, `ShortSideScale`, `RandomCrop`, `CenterCrop`, `RandomHorizontalFlip`, `Resize`.
@@ -121,7 +124,7 @@ Two-stage pipeline:
 
 - `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, and output extractor for each model.
 - `register_model(name, spec)` / `get_model_spec(name)` / `list_models()` — lightweight registry.
-- Built-in registrations: `"videomae"`, `"r2plus1d"`.
+- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`.
 - CLI `train.py` uses the registry via `_run_training()` — a single generic flow that loads the spec, builds datasets with the model's presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
@@ -132,12 +135,28 @@ Two-stage pipeline:
 - Label metadata is read from the dataset's `label` feature (ClassLabel).
 - Multi-GPU via `torch.distributed.launcher.api.elastic_launch` (configured in CLI).
 
+### Shared Model Base (`lpcv/models/base.py`)
+
+- `ModelOutput`: lightweight output wrapper with `.loss` and `.logits` — replaces per-model output classes.
+- `compute_metrics()`: shared top-1/top-5 accuracy computation.
+- `collate_for_video()`: shared collation with optional `(T,C,H,W)` → `(C,T,H,W)` permutation.
+- `log_freeze_stats()`: shared parameter-count logging after freezing.
+- `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, `save_pretrained()`, `_extra_save_meta()` hook.
+- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving. Subclasses override `_init_model()` and `_apply_freeze_strategy()`.
+
 ### Model Training (`lpcv/models/r2plus1d.py`)
 
 - `R2Plus1DTrainerConfig`: dataclass with defaults optimised for few-epoch fine-tuning (2 epochs, cosine LR, label smoothing 0.1, partial freeze).
-- `R2Plus1DForClassification`: wraps torchvision `r2plus1d_18` with HF Trainer-compatible interface (`pixel_values`/`labels` kwargs, `.logits` output).
-- `R2Plus1DModelTrainer`: same pattern as VideoMAE — HF `Trainer` wrapper with freeze strategies (`none`/`backbone`/`partial`), label smoothing, and `val_transform.json` saving.
+- `R2Plus1DForClassification(BaseForClassification)`: wraps torchvision `r2plus1d_18` with HF Trainer-compatible interface.
+- `R2Plus1DModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` for R2+1D-specific freezing (`layer4` + `fc`).
 - `save_pretrained()` / `load_pretrained()` — custom checkpoint format (`model.pt` with state dict + num_classes).
+
+### Model Training (`lpcv/models/x3d.py`)
+
+- `X3D_PRESET_DEFAULTS`: maps preset names (`x3d_xs`/`x3d_s`/`x3d_m`/`x3d_l`) to default `num_frames` and `crop_size`.
+- `X3DTrainerConfig`: dataclass with `preset`, `crop_size`, `num_frames` fields; `resolved_num_frames()`/`resolved_crop_size()` fall back to preset defaults when 0.
+- `X3DForClassification(BaseForClassification)`: loads X3D from `facebookresearch/pytorchvideo` via `torch.hub`, replaces the head projection with a custom linear layer.
+- `X3DModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` for X3D-specific freezing (`blocks.4` + `blocks.5`).
 
 ### Submission Pipeline (`lpcv/submission.py`)
 

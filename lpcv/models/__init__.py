@@ -79,7 +79,7 @@ def list_models() -> list[str]:
 
 def _register_builtins() -> None:
     """Register built-in model types (deferred imports for fast CLI startup)."""
-    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET
+    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, make_presets
 
     def _load_videomae(path: str) -> nn.Module:
         from transformers import VideoMAEForVideoClassification
@@ -119,8 +119,32 @@ def _register_builtins() -> None:
             output_extractor=lambda out: out.logits,
         )
 
+    def _load_x3d(path: str) -> nn.Module:
+        from lpcv.models.x3d import X3DForClassification
+
+        return X3DForClassification.load_pretrained(path)
+
+    def _make_x3d_spec() -> ModelSpec:
+        from lpcv.datasets.info import X3D_MEAN, X3D_STD
+        from lpcv.models.x3d import X3DModelTrainer, X3DTrainerConfig
+
+        train_preset, val_preset = make_presets(
+            mean=X3D_MEAN, std=X3D_STD, resize_height=256, resize_width=256, crop_size=256
+        )
+        return ModelSpec(
+            train_preset=train_preset,
+            val_preset=val_preset,
+            config_cls=X3DTrainerConfig,
+            trainer_cls=X3DModelTrainer,
+            loader=_load_x3d,
+            input_layout="BCTHW",
+            input_key="pixel_values",
+            output_extractor=lambda out: out.logits,
+        )
+
     register_model("videomae", _make_videomae_spec())
     register_model("r2plus1d", _make_r2plus1d_spec())
+    register_model("x3d", _make_x3d_spec())
 
 
 _register_builtins()

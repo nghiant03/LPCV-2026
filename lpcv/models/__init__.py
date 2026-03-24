@@ -79,12 +79,7 @@ def list_models() -> list[str]:
 
 def _register_builtins() -> None:
     """Register built-in model types (deferred imports for fast CLI startup)."""
-    from lpcv.transforms import (
-        TRAIN_PRESET,
-        VAL_PRESET,
-        VIDEOMAE_TRAIN_PRESET,
-        VIDEOMAE_VAL_PRESET,
-    )
+    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET
 
     def _load_videomae(path: str) -> nn.Module:
         from transformers import VideoMAEForVideoClassification
@@ -95,8 +90,8 @@ def _register_builtins() -> None:
         from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
 
         return ModelSpec(
-            train_preset=VIDEOMAE_TRAIN_PRESET,
-            val_preset=VIDEOMAE_VAL_PRESET,
+            train_preset=TRAIN_PRESET,
+            val_preset=VAL_PRESET,
             config_cls=VideoMAETrainerConfig,
             trainer_cls=VideoMAEModelTrainer,
             loader=_load_videomae,

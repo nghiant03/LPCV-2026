@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import onnx
 import torch
-import torchvision.transforms as T
 from loguru import logger
 from tqdm import tqdm
 
@@ -35,9 +34,6 @@ DEFAULT_NUM_FRAMES = 16
 
 COMPETITION_SPATIAL_SIZE = 112
 """Spatial resolution of the competition's fixed input pipeline."""
-
-COMPETITION_RESIZE_HW = (128, 171)
-"""Resize target before center crop in the competition pipeline."""
 
 DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"
 """Default Qualcomm AI Hub device for compilation and inference."""
@@ -86,12 +82,8 @@ def preprocess_dataset(
         Path to the written ``manifest.jsonl``.
     """
     from lpcv.datasets.decoder import get_decoder
-    from lpcv.datasets.info import (
-        R2PLUS1D_MEAN,
-        R2PLUS1D_STD,
-        TARGET_LABEL_FILE_NAME,
-        VIDEO_EXTENSIONS,
-    )
+    from lpcv.datasets.info import TARGET_LABEL_FILE_NAME, VIDEO_EXTENSIONS
+    from lpcv.transforms import COMPETITION_PRESET, build_transform
 
     decoder = get_decoder(decoder_name, target_fps=target_fps)
 
@@ -121,14 +113,7 @@ def preprocess_dataset(
     if not video_entries:
         raise FileNotFoundError(f"No videos found in {val_dir}")
 
-    spatial = T.Compose(
-        [
-            T.Lambda(lambda x: x / 255.0 if x.max() > 1.0 else x),
-            T.Resize(COMPETITION_RESIZE_HW, antialias=False),
-            T.Normalize(mean=R2PLUS1D_MEAN, std=R2PLUS1D_STD),
-            T.CenterCrop(COMPETITION_SPATIAL_SIZE),
-        ]
-    )
+    spatial = build_transform(COMPETITION_PRESET)
 
     manifest_path = output_dir / "manifest.jsonl"
     logger.info(f"Preprocessing {len(video_entries)} videos → {output_dir}")

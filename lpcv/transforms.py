@@ -7,10 +7,11 @@ spatial/temporal transforms operate on ``torch.Tensor`` with shape
 
 Built-in presets:
 
+- ``COMPETITION_PRESET`` — the competition's fixed preprocessing pipeline
+  (R2+1D normalisation, 128×171 resize, 112×112 center crop).  Single
+  source of truth for preprocess and adapter diffing.
 - ``TRAIN_PRESET`` / ``VAL_PRESET`` — default presets matching the LPCVC
-  reference solution (R2+1D normalisation, 128×171 resize, 112×112 crop).
-- ``VIDEOMAE_TRAIN_PRESET`` / ``VIDEOMAE_VAL_PRESET`` — VideoMAE-specific
-  presets (ImageNet normalisation, 224×224 spatial size).
+  reference solution.
 
 Each trainer saves the val transform config alongside the model checkpoint
 so the submission adapter can be auto-built from the difference between
@@ -28,7 +29,7 @@ import torch
 import torch.nn.functional as F
 from torchvision.transforms import Compose
 
-from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD, R2PLUS1D_MEAN, R2PLUS1D_STD
+from lpcv.datasets.info import R2PLUS1D_MEAN, R2PLUS1D_STD
 
 TransformFactory = Callable[..., Callable[[torch.Tensor], torch.Tensor]]
 """Type alias for a callable that produces a transform function."""
@@ -356,6 +357,18 @@ class Resize:
 
 
 # ---------------------------------------------------------------------------
+# Competition preset (single source of truth)
+# ---------------------------------------------------------------------------
+
+COMPETITION_PRESET: list[dict[str, Any]] = [
+    {"name": "ScalePixels"},
+    {"name": "Resize", "height": 128, "width": 171},
+    {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
+    {"name": "CenterCrop", "height": 112},
+]
+"""Competition's fixed preprocessing pipeline (R2+1D norm, 128×171, 112×112 crop)."""
+
+# ---------------------------------------------------------------------------
 # Default presets (match LPCVC reference solution)
 # ---------------------------------------------------------------------------
 
@@ -368,33 +381,8 @@ TRAIN_PRESET: list[dict[str, Any]] = [
 ]
 """Default training preset — matches the LPCVC reference solution."""
 
-VAL_PRESET: list[dict[str, Any]] = [
-    {"name": "ScalePixels"},
-    {"name": "Resize", "height": 128, "width": 171},
-    {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
-    {"name": "CenterCrop", "height": 112},
-]
-"""Default validation preset — matches the LPCVC reference solution."""
-
-# ---------------------------------------------------------------------------
-# VideoMAE presets
-# ---------------------------------------------------------------------------
-
-VIDEOMAE_TRAIN_PRESET: list[dict[str, Any]] = [
-    {"name": "ScalePixels"},
-    {"name": "Normalize", "mean": IMAGENET_MEAN, "std": IMAGENET_STD},
-    {"name": "RandomShortSideScale", "min_size": 256, "max_size": 320},
-    {"name": "RandomCrop", "height": 224},
-    {"name": "RandomHorizontalFlip", "p": 0.5},
-]
-"""VideoMAE training preset (ImageNet normalisation, 224×224)."""
-
-VIDEOMAE_VAL_PRESET: list[dict[str, Any]] = [
-    {"name": "ScalePixels"},
-    {"name": "Normalize", "mean": IMAGENET_MEAN, "std": IMAGENET_STD},
-    {"name": "Resize", "height": 224},
-]
-"""VideoMAE validation preset (ImageNet normalisation, 224×224)."""
+VAL_PRESET: list[dict[str, Any]] = COMPETITION_PRESET
+"""Default validation preset — identical to the competition pipeline."""
 
 
 # ---------------------------------------------------------------------------
@@ -469,18 +457,11 @@ def extract_adapter_steps(
         Steps that deviate from the competition pipeline.  The submission
         adapter should apply these in-graph.
     """
-    competition_steps = [
-        {"name": "ScalePixels"},
-        {"name": "Resize", "height": 128, "width": 171},
-        {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
-        {"name": "CenterCrop", "height": 112},
-    ]
-
-    if val_config == competition_steps:
+    if val_config == COMPETITION_PRESET:
         return []
 
     extra: list[dict[str, Any]] = []
     for step in val_config:
-        if step not in competition_steps:
+        if step not in COMPETITION_PRESET:
             extra.append(step)
     return extra

@@ -110,11 +110,9 @@ Two-stage pipeline:
 - All transforms operate on `torch.Tensor` with shape `(T, C, H, W)`.
 - `VideoTransformCallable` wraps a `Compose` pipeline for use with HF `set_transform`.
 - Default presets match the LPCVC reference solution (R2+1D norm, 128×171 resize, 112×112 crop):
+  - `COMPETITION_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112). Single source of truth for the competition's fixed pipeline; used by `preprocess_dataset()` and `extract_adapter_steps()`.
   - `TRAIN_PRESET` — ScalePixels → Resize(128,171) → RandomHorizontalFlip → Normalize(R2+1D) → RandomCrop(112).
-  - `VAL_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112).
-- VideoMAE presets (ImageNet norm, 224×224):
-  - `VIDEOMAE_TRAIN_PRESET` — ScalePixels → Normalize(ImageNet) → RandomShortSideScale → RandomCrop(224) → RandomHorizontalFlip.
-  - `VIDEOMAE_VAL_PRESET` — ScalePixels → Normalize(ImageNet) → Resize(224).
+  - `VAL_PRESET` — alias for `COMPETITION_PRESET`.
 - `save_val_transform_config()` / `load_val_transform_config()` — persist val transform config as JSON alongside model checkpoints.
 - `extract_adapter_steps()` — diffs a saved val config against the competition pipeline; returns only the extra steps needed for the ONNX adapter.
 - Registered transforms: `FromVideo`, `UniformTemporalSubsample`, `ScalePixels`, `Normalize`, `RandomShortSideScale`, `ShortSideScale`, `RandomCrop`, `CenterCrop`, `RandomHorizontalFlip`, `Resize`.

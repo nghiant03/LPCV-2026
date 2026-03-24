@@ -8,6 +8,8 @@ Provides a PyTorch ``Dataset`` that delegates frame decoding to an injected
 from __future__ import annotations
 
 import json
+import math
+import random
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -116,12 +118,52 @@ class VideoDataset(Dataset):
         return {"pixel_values": video, "labels": label}
 
 
+def _stratified_subsample(
+    paths: list[Path],
+    labels: list[int],
+    fraction: float,
+    seed: int = 42,
+) -> tuple[list[Path], list[int]]:
+    """Subsample *paths* and *labels* keeping the original class ratio.
+
+    Parameters
+    ----------
+    paths
+        Video file paths.
+    labels
+        Corresponding integer class ids.
+    fraction
+        Fraction of data to keep (0.0, 1.0].
+    seed
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    tuple[list[Path], list[int]]
+        Subsampled ``(paths, labels)``.
+    """
+    by_class: dict[int, list[int]] = {}
+    for idx, lbl in enumerate(labels):
+        by_class.setdefault(lbl, []).append(idx)
+
+    rng = random.Random(seed)
+    selected: list[int] = []
+    for cls_id in sorted(by_class):
+        indices = by_class[cls_id]
+        k = max(1, math.ceil(len(indices) * fraction))
+        selected.extend(rng.sample(indices, k))
+
+    selected.sort()
+    return [paths[i] for i in selected], [labels[i] for i in selected]
+
+
 def load_video_dataset(
     data_dir: str | Path,
     decoder: VideoDecoder,
     train_transform: Compose | None = None,
     val_transform: Compose | None = None,
     num_frames: int = 16,
+    data_percent: float = 100.0,
 ) -> tuple[VideoDataset, VideoDataset]:
     """Build train and val :class:`VideoDataset` from a videofolder layout.
 
@@ -145,6 +187,9 @@ def load_video_dataset(
         Transform pipeline applied to validation samples.
     num_frames
         Number of frames to sample per video.
+    data_percent
+        Percentage of data to use (0–100]. Stratified sampling preserves
+        the original class ratio. Applies to both train and val splits.
 
     Returns
     -------
@@ -155,7 +200,11 @@ def load_video_dataset(
     ------
     FileNotFoundError
         If the label file or a required split directory is missing.
+    ValueError
+        If *data_percent* is not in (0, 100].
     """
+    if not (0.0 < data_percent <= 100.0):
+        raise ValueError(f"data_percent must be in (0, 100], got {data_percent}")
     data_dir = Path(data_dir)
     label_file = data_dir / TARGET_LABEL_FILE_NAME
     if not label_file.is_file():
@@ -187,6 +236,11 @@ def load_video_dataset(
                 if video_file.is_file() and video_file.suffix.lower() in VIDEO_EXTENSIONS:
                     paths.append(video_file)
                     labels.append(class_id)
+
+        if data_percent < 100.0:
+            total = len(paths)
+            paths, labels = _stratified_subsample(paths, labels, data_percent / 100.0)
+            logger.info(f"[{split}] Subsampled {data_percent:.1f}%: {total} → {len(paths)} videos")
 
         transform = train_transform if split == "train" else val_transform
         ds = VideoDataset(

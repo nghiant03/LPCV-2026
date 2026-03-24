@@ -23,6 +23,7 @@ def _run_training(
     num_gpus: int,
     train_preset_override: list[dict[str, Any]] | None = None,
     val_preset_override: list[dict[str, Any]] | None = None,
+    data_percent: float = 100.0,
 ) -> None:
     """Shared training flow for any registered model.
 
@@ -58,6 +59,7 @@ def _run_training(
         train_transform=train_transform,
         val_transform=val_transform,
         num_frames=num_frames,
+        data_percent=data_percent,
     )
 
     config_overrides["dataloader_pin_memory"] = pin_memory
@@ -177,6 +179,13 @@ def videomae(
         int,
         typer.Option("--num-gpus", "-g", help="Number of GPUs for distributed training."),
     ] = 1,
+    data_percent: Annotated[
+        float,
+        typer.Option(
+            "--data-percent",
+            help="Percentage of data to use (0–100]. Stratified sampling preserves class ratio.",
+        ),
+    ] = 100.0,
 ) -> None:
     """Train a VideoMAE model on the QEVD dataset."""
     _run_training(
@@ -205,6 +214,7 @@ def videomae(
         decoder=decoder,
         num_frames=num_frames,
         num_gpus=num_gpus,
+        data_percent=data_percent,
     )
 
 
@@ -294,6 +304,13 @@ def r2plus1d(
         int,
         typer.Option("--num-gpus", "-g", help="Number of GPUs for distributed training."),
     ] = 1,
+    data_percent: Annotated[
+        float,
+        typer.Option(
+            "--data-percent",
+            help="Percentage of data to use (0–100]. Stratified sampling preserves class ratio.",
+        ),
+    ] = 100.0,
 ) -> None:
     """Train an R(2+1)D-18 model on the QEVD dataset."""
     _run_training(
@@ -321,6 +338,7 @@ def r2plus1d(
         decoder=decoder,
         num_frames=num_frames,
         num_gpus=num_gpus,
+        data_percent=data_percent,
     )
 
 
@@ -428,6 +446,13 @@ def x3d(
         int,
         typer.Option("--num-gpus", "-g", help="Number of GPUs for distributed training."),
     ] = 1,
+    data_percent: Annotated[
+        float,
+        typer.Option(
+            "--data-percent",
+            help="Percentage of data to use (0–100]. Stratified sampling preserves class ratio.",
+        ),
+    ] = 100.0,
 ) -> None:
     """Train an X3D model on the QEVD dataset."""
     from lpcv.datasets.info import X3D_MEAN, X3D_STD
@@ -479,4 +504,5 @@ def x3d(
         num_gpus=num_gpus,
         train_preset_override=train_preset,
         val_preset_override=val_preset,
+        data_percent=data_percent,
     )

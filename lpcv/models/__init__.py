@@ -126,10 +126,15 @@ def _register_builtins() -> None:
 
     def _make_x3d_spec() -> ModelSpec:
         from lpcv.datasets.info import X3D_MEAN, X3D_STD
-        from lpcv.models.x3d import X3DModelTrainer, X3DTrainerConfig
+        from lpcv.models.x3d import X3D_PRESET_DEFAULTS, X3DModelTrainer, X3DTrainerConfig
 
+        default_crop = X3D_PRESET_DEFAULTS["x3d_m"]["crop_size"]
         train_preset, val_preset = make_presets(
-            mean=X3D_MEAN, std=X3D_STD, resize_height=256, resize_width=256, crop_size=256
+            mean=X3D_MEAN,
+            std=X3D_STD,
+            resize_height=default_crop,
+            resize_width=default_crop,
+            crop_size=default_crop,
         )
         return ModelSpec(
             train_preset=train_preset,

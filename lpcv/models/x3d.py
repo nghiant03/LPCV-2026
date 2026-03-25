@@ -26,12 +26,31 @@ from loguru import logger
 from lpcv.models.base import BaseForClassification, BaseModelTrainer, log_freeze_stats
 
 X3D_PRESET_DEFAULTS: dict[str, dict[str, int]] = {
-    "x3d_xs": {"num_frames": 4, "crop_size": 182},
-    "x3d_s": {"num_frames": 13, "crop_size": 182},
-    "x3d_m": {"num_frames": 16, "crop_size": 256},
+    "x3d_xs": {"num_frames": 4, "crop_size": 160},
+    "x3d_s": {"num_frames": 13, "crop_size": 160},
+    "x3d_m": {"num_frames": 16, "crop_size": 224},
     "x3d_l": {"num_frames": 16, "crop_size": 312},
 }
 """Default num_frames and crop_size for each X3D variant from pytorchvideo."""
+
+
+def _replace_head_pool_with_adaptive(head_block: Any) -> None:
+    """Replace the fixed ``AvgPool3d`` in the X3D head with ``AdaptiveAvgPool3d``.
+
+    The default pytorchvideo X3D head uses a fixed-kernel ``AvgPool3d`` sized
+    for the model's canonical ``input_crop_size``.  When a different spatial
+    size is used the feature map may be smaller than the kernel, causing a
+    ``RuntimeError``.  Swapping to ``AdaptiveAvgPool3d((1, 1, 1))`` makes the
+    head resolution-agnostic.
+
+    Parameters
+    ----------
+    head_block
+        The X3D head block (``backbone.blocks[5]``).
+    """
+    pool_wrapper = head_block.pool
+    if hasattr(pool_wrapper, "pool") and hasattr(pool_wrapper.pool, "pool"):
+        pool_wrapper.pool.pool = nn.AdaptiveAvgPool3d((1, 1, 1))
 
 
 @dataclass
@@ -199,6 +218,8 @@ class X3DForClassification(BaseForClassification):
         in_features: int = head_block.proj.in_features
         head_block.proj = nn.Linear(in_features, num_classes)
         head_block.activation = None
+
+        _replace_head_pool_with_adaptive(head_block)
 
         self.num_classes = num_classes
         self.preset = preset

@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 class ModelOutput:
     """Minimal output wrapper matching the HuggingFace Trainer interface.
 
+    Supports attribute access (``output.loss``), dict-style access
+    (``output["loss"]``), and integer indexing (``output[0]``) so the
+    HuggingFace Trainer can consume it in all code paths.
+
     Attributes
     ----------
     loss
@@ -41,6 +45,11 @@ class ModelOutput:
     def __init__(self, loss: torch.Tensor | None, logits: torch.Tensor) -> None:
         self.loss = loss
         self.logits = logits
+
+    def __getitem__(self, key: str | int) -> torch.Tensor | None:
+        if isinstance(key, int):
+            return (self.loss, self.logits)[key]
+        return getattr(self, key)
 
 
 def compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:

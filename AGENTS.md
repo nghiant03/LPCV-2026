@@ -86,6 +86,7 @@ lpcv/
 - Uses **Typer** with sub-app pattern: `main.py` mounts `data`, `train`, `evaluate`, `submit` sub-commands.
 - Heavy imports (torch, transformers, datasets) are deferred inside command functions to keep CLI startup fast.
 - All CLI parameters use `Annotated[T, typer.Option/Argument]` style.
+- **WARNING**: Functions passed to `elastic_launch` (multi-GPU training) **must** be defined at module level, not as closures or nested functions. Nested functions cannot be pickled by `torch.distributed`'s spawn-based multiprocessing and will raise `AttributeError: Can't pickle local object`. The `_launch()` function in `train.py` is intentionally at module level for this reason.
 
 ### Dataset Pipeline (`lpcv/datasets/`)
 

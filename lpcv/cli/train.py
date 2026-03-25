@@ -14,6 +14,24 @@ from loguru import logger
 app = typer.Typer(help="Model training operations.")
 
 
+def _launch(model_name: str, cfg, train, val, val_cfg) -> None:
+    """Top-level training entry point for multi-GPU elastic launch.
+
+    Must be defined at module level so it can be pickled by
+    ``torch.distributed``'s spawn-based multiprocessing.
+    """
+    from lpcv.models import get_model_spec
+
+    spec = get_model_spec(model_name)
+    trainer = spec.trainer_cls(
+        config=cfg,
+        train_dataset=train,
+        eval_dataset=val,
+        val_transform_config=val_cfg,
+    )
+    trainer.train()
+
+
 def _run_training(
     model_name: str,
     data_dir: Path,
@@ -65,15 +83,6 @@ def _run_training(
     config_overrides["dataloader_pin_memory"] = pin_memory
     config = spec.config_cls(**config_overrides)
 
-    def _launch(cfg, train, val, val_cfg) -> None:
-        trainer = spec.trainer_cls(
-            config=cfg,
-            train_dataset=train,
-            eval_dataset=val,
-            val_transform_config=val_cfg,
-        )
-        trainer.train()
-
     if num_gpus > 1:
         from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 
@@ -84,9 +93,9 @@ def _run_training(
             rdzv_backend="c10d",
             rdzv_endpoint="localhost:0",
         )
-        elastic_launch(launch_config, _launch)(config, train_ds, eval_ds, val_preset)
+        elastic_launch(launch_config, _launch)(model_name, config, train_ds, eval_ds, val_preset)
     else:
-        _launch(config, train_ds, eval_ds, val_preset)
+        _launch(model_name, config, train_ds, eval_ds, val_preset)
 
 
 @app.command()

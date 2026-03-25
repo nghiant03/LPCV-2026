@@ -182,18 +182,12 @@ class X3DModelTrainer(BaseModelTrainer):
             f"Initializing X3D ({self.config.preset}) trainer: classes={num_classes}, "
             f"epochs={self.config.num_train_epochs}, freeze={self.config.freeze_strategy}"
         )
-        model = X3DForClassification(
+        return X3DForClassification(
             num_classes=num_classes,
             preset=self.config.preset,
             pretrained=True,
             label_smoothing=self.config.label_smoothing,
         )
-        for p in model.parameters():
-            if not p.is_contiguous():
-                p.data = p.data.contiguous()
-            if p.requires_grad and p.ndim == 5:
-                p.register_hook(lambda g: g.contiguous())
-        return model
 
     def _apply_freeze_strategy(self, strategy: str) -> None:
         """Freeze model parameters according to *strategy*.

@@ -130,33 +130,31 @@ Two-stage pipeline:
 
 ### Model Training (`lpcv/models/videomae.py`)
 
-- `VideoMAETrainerConfig`: dataclass holding all training hyperparameters (~30 fields).
-- `VideoMAEModelTrainer`: wraps HuggingFace `Trainer`. Handles model loading, freeze strategies (`none`/`backbone`/`partial`), custom collation via `_collate_fn()`, and top-1/top-5 metric computation via `_compute_metrics()`.
-- Accepts `val_transform_config` and saves it as `val_transform.json` alongside the model.
-- Label metadata is read from the dataset's `label` feature (ClassLabel).
+- `VideoMAETrainerConfig(BaseTrainerConfig)`: adds `model_name`, `num_frames`, `gradient_checkpointing`; overrides defaults (15 epochs, 5e-5 LR, linear scheduler).
+- `VideoMAEModelTrainer(BaseModelTrainer)`: wraps HuggingFace `Trainer`. Handles model loading via `from_pretrained`, freeze strategies (`none`/`backbone`/`partial`), BTCHW collation (no permute), and `trainer.save_model()` for checkpoints.
 - Multi-GPU via `torch.distributed.launcher.api.elastic_launch` (configured in CLI).
 
 ### Shared Model Base (`lpcv/models/base.py`)
 
-- `ModelOutput`: lightweight output wrapper with `.loss` and `.logits` — replaces per-model output classes.
+- `ModelOutput`: lightweight output wrapper with `.loss` and `.logits` — supports attribute, dict, and index access for HF Trainer compatibility.
+- `BaseTrainerConfig`: shared training hyperparameters (~28 fields) inherited by all model configs. Subclasses add model-specific fields and override defaults.
 - `compute_metrics()`: shared top-1/top-5 accuracy computation.
 - `collate_for_video()`: shared collation with optional `(T,C,H,W)` → `(C,T,H,W)` permutation.
 - `log_freeze_stats()`: shared parameter-count logging after freezing.
 - `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, `save_pretrained()`, `_extra_save_meta()` hook.
-- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving. Subclasses override `_init_model()` and `_apply_freeze_strategy()`.
+- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving, `ddp_find_unused_parameters=True`. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
 
 ### Model Training (`lpcv/models/r2plus1d.py`)
 
-- `R2Plus1DTrainerConfig`: dataclass with defaults optimised for few-epoch fine-tuning (2 epochs, cosine LR, label smoothing 0.1, partial freeze).
+- `R2Plus1DTrainerConfig(BaseTrainerConfig)`: adds `num_classes`, `num_frames`, `label_smoothing`; overrides defaults (2 epochs, cosine LR, 1e-2 LR, partial freeze).
 - `R2Plus1DForClassification(BaseForClassification)`: wraps torchvision `r2plus1d_18` with HF Trainer-compatible interface.
 - `R2Plus1DModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` for R2+1D-specific freezing (`layer4` + `fc`).
-- `save_pretrained()` / `load_pretrained()` — custom checkpoint format (`model.pt` with state dict + num_classes).
 
 ### Model Training (`lpcv/models/x3d.py`)
 
-- `X3D_PRESET_DEFAULTS`: maps preset names (`x3d_xs`/`x3d_s`/`x3d_m`/`x3d_l`) to default `num_frames` and `crop_size`.
-- `X3DTrainerConfig`: dataclass with `preset`, `crop_size`, `num_frames` fields; `resolved_num_frames()`/`resolved_crop_size()` fall back to preset defaults when 0.
-- `X3DForClassification(BaseForClassification)`: loads X3D from `facebookresearch/pytorchvideo` via `torch.hub`, replaces the head projection with a custom linear layer.
+- `X3D_PRESET_DEFAULTS`: maps preset names (`x3d_xs`/`x3d_s`/`x3d_m`/`x3d_l`) to default `num_frames` and `crop_size` (from pytorchvideo hub: 160/160/224/312).
+- `X3DTrainerConfig(BaseTrainerConfig)`: adds `preset`, `crop_size`, `num_frames`, `label_smoothing`; `resolved_num_frames()`/`resolved_crop_size()` fall back to preset defaults when 0.
+- `X3DForClassification(BaseForClassification)`: loads X3D from `facebookresearch/pytorchvideo` via `torch.hub`, replaces the head projection with a custom linear layer, swaps fixed `AvgPool3d` with `AdaptiveAvgPool3d((1,1,1))` for resolution-agnostic pooling.
 - `X3DModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` for X3D-specific freezing (`blocks.4` + `blocks.5`).
 
 ### Submission Pipeline (`lpcv/submission.py`)

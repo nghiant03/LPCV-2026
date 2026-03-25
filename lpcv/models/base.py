@@ -5,12 +5,14 @@ Provides building blocks reused across model implementations:
 - :class:`ModelOutput` — lightweight output wrapper for HuggingFace Trainer.
 - :func:`compute_metrics` — top-1 / top-5 accuracy computation.
 - :func:`collate_for_video` — video batch collation with optional layout permutation.
+- :class:`BaseTrainerConfig` — common training hyperparameters.
 - :class:`BaseForClassification` — ``nn.Module`` base for custom classification wrappers.
-- :class:`BaseModelTrainer` — shared HuggingFace Trainer integration for non-HF models.
+- :class:`BaseModelTrainer` — shared HuggingFace Trainer integration.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -118,6 +120,102 @@ def log_freeze_stats(model: nn.Module, strategy: str) -> None:
     )
 
 
+@dataclass
+class BaseTrainerConfig:
+    """Common training hyperparameters shared by all model trainers.
+
+    Subclasses add model-specific fields and may override defaults.
+
+    Attributes
+    ----------
+    output_dir
+        Directory for checkpoints and the final saved model.
+    num_train_epochs
+        Total training epochs.
+    per_device_train_batch_size
+        Batch size per GPU during training.
+    per_device_eval_batch_size
+        Batch size per GPU during evaluation.
+    learning_rate
+        Peak learning rate for the optimiser.
+    warmup_ratio
+        Fraction of total steps used for linear warmup.
+    weight_decay
+        L2 regularisation coefficient.
+    logging_steps
+        Log metrics every N optimiser steps.
+    eval_strategy
+        When to evaluate: ``"epoch"``, ``"steps"``, or ``"no"``.
+    save_strategy
+        When to save checkpoints: ``"epoch"``, ``"steps"``, or ``"no"``.
+    save_total_limit
+        Maximum number of checkpoints to keep on disk.
+    load_best_model_at_end
+        Whether to reload the best checkpoint after training.
+    metric_for_best_model
+        Metric name used for best-model selection.
+    fp16
+        Enable FP16 mixed precision.
+    bf16
+        Enable BF16 mixed precision.
+    dataloader_num_workers
+        Number of data-loading worker processes.
+    dataloader_pin_memory
+        Pin memory for faster host-to-device transfer.
+    dataloader_persistent_workers
+        Keep workers alive between epochs.
+    dataloader_prefetch_factor
+        Number of batches to prefetch per worker.
+    remove_unused_columns
+        Whether the Trainer should drop columns not used by the model.
+    resume_from_checkpoint
+        Path to a checkpoint directory to resume from.
+    gradient_accumulation_steps
+        Number of forward passes before an optimiser step.
+    max_steps
+        Stop after N optimiser steps (overrides *num_train_epochs* when > 0).
+    lr_scheduler_type
+        Learning rate scheduler type.
+    torch_compile
+        Use ``torch.compile`` for fused kernels.
+    tf32
+        Enable TF32 math on Ampere+ GPUs.
+    freeze_strategy
+        Parameter freeze strategy: ``"none"``, ``"backbone"``, or ``"partial"``.
+    extra_args
+        Additional keyword arguments forwarded to ``TrainingArguments``.
+    """
+
+    output_dir: str = "output"
+    num_train_epochs: int = 10
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 8
+    learning_rate: float = 5e-3
+    warmup_ratio: float = 0.1
+    weight_decay: float = 1e-4
+    logging_steps: int = 10
+    eval_strategy: str = "epoch"
+    save_strategy: str = "epoch"
+    save_total_limit: int = 2
+    load_best_model_at_end: bool = True
+    metric_for_best_model: str = "accuracy"
+    fp16: bool = False
+    bf16: bool = False
+    dataloader_num_workers: int = 4
+    dataloader_pin_memory: bool = True
+    dataloader_persistent_workers: bool = False
+    dataloader_prefetch_factor: int | None = None
+    remove_unused_columns: bool = False
+    resume_from_checkpoint: str | None = None
+    gradient_accumulation_steps: int = 1
+    max_steps: int = -1
+    lr_scheduler_type: str = "cosine"
+    torch_compile: bool = False
+    tf32: bool = False
+    freeze_strategy: str = "none"
+    extra_args: dict[str, Any] = field(default_factory=dict)
+
+
 class BaseForClassification(nn.Module):
     """Base ``nn.Module`` for torchvision / torch-hub classification wrappers.
 
@@ -191,7 +289,7 @@ class BaseForClassification(nn.Module):
 
 
 class BaseModelTrainer:
-    """Shared HuggingFace Trainer wrapper for non-HF video classification models.
+    """Shared HuggingFace Trainer wrapper for video classification models.
 
     Handles label extraction, model initialisation (via :meth:`_init_model`),
     parameter freezing (via :meth:`_apply_freeze_strategy`), metric computation,
@@ -242,7 +340,7 @@ class BaseModelTrainer:
 
         torch.backends.cudnn.benchmark = True
 
-    def _init_model(self) -> BaseForClassification:
+    def _init_model(self) -> BaseForClassification | nn.Module:
         """Create and return the model instance.
 
         Subclasses must override this method.
@@ -258,7 +356,12 @@ class BaseModelTrainer:
 
     @staticmethod
     def _collate_fn(examples: list[dict]) -> dict[str, torch.Tensor]:
-        """Collate samples, permuting ``(T,C,H,W)`` → ``(C,T,H,W)``."""
+        """Collate samples into a batch.
+
+        Default permutes ``(T,C,H,W)`` → ``(C,T,H,W)`` for models
+        expecting channel-first temporal layout.  Override for models
+        that expect ``(B,T,C,H,W)`` (e.g. VideoMAE).
+        """
         return collate_for_video(examples, permute_to_cthw=True)
 
     @staticmethod
@@ -301,6 +404,8 @@ class BaseModelTrainer:
             torch_compile=self.config.torch_compile,
             tf32=self.config.tf32,
             report_to="none",
+            ddp_find_unused_parameters=True,
+            **self._extra_training_args(),
             **self.config.extra_args,
         )
 
@@ -317,7 +422,7 @@ class BaseModelTrainer:
         trainer.train(resume_from_checkpoint=self.config.resume_from_checkpoint)
 
         output_path = Path(self.config.output_dir) / "best_model"
-        self.model.save_pretrained(output_path)
+        self._save_model(trainer, output_path)
 
         if self.val_transform_config is not None:
             from lpcv.transforms import save_val_transform_config
@@ -326,3 +431,20 @@ class BaseModelTrainer:
 
         logger.info(f"Model saved to {output_path}")
         return output_path
+
+    def _extra_training_args(self) -> dict[str, Any]:
+        """Return additional kwargs for ``TrainingArguments``.
+
+        Override in subclasses to inject model-specific arguments
+        (e.g. ``gradient_checkpointing``).
+        """
+        return {}
+
+    def _save_model(self, trainer: Trainer, path: Path) -> None:
+        """Save the trained model to *path*.
+
+        Default calls ``self.model.save_pretrained(path)`` for custom
+        ``BaseForClassification`` models.  Override for HuggingFace models
+        that use ``trainer.save_model()``.
+        """
+        self.model.save_pretrained(path)  # type: ignore[union-attr]

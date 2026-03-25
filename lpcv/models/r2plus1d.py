@@ -10,21 +10,28 @@ frozen backbone, unfrozen ``layer4`` + ``fc``, and cosine LR schedule.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 import torch.nn as nn
 from loguru import logger
 from torchvision.models.video import R2Plus1D_18_Weights, r2plus1d_18
 
-from lpcv.models.base import BaseForClassification, BaseModelTrainer, log_freeze_stats
+from lpcv.models.base import (
+    BaseForClassification,
+    BaseModelTrainer,
+    BaseTrainerConfig,
+    log_freeze_stats,
+)
 
 
 @dataclass
-class R2Plus1DTrainerConfig:
-    """All hyperparameters for an R(2+1)D-18 training run.
+class R2Plus1DTrainerConfig(BaseTrainerConfig):
+    """Hyperparameters for an R(2+1)D-18 training run.
+
+    Inherits all common fields from :class:`BaseTrainerConfig` and adds
+    R(2+1)D-specific settings.
 
     Attributes
     ----------
@@ -33,101 +40,18 @@ class R2Plus1DTrainerConfig:
         When ``0``, inferred from the dataset.
     num_frames
         Number of frames sampled per video.
-    output_dir
-        Directory for checkpoints and the final saved model.
-    num_train_epochs
-        Total training epochs.
-    per_device_train_batch_size
-        Batch size per GPU during training.
-    per_device_eval_batch_size
-        Batch size per GPU during evaluation.
-    learning_rate
-        Peak learning rate for the optimiser.
-    warmup_ratio
-        Fraction of total steps used for linear warmup.
-    weight_decay
-        L2 regularisation coefficient.
     label_smoothing
         Label smoothing factor for cross-entropy loss.
-    logging_steps
-        Log metrics every N optimiser steps.
-    eval_strategy
-        When to evaluate: ``"epoch"``, ``"steps"``, or ``"no"``.
-    save_strategy
-        When to save checkpoints: ``"epoch"``, ``"steps"``, or ``"no"``.
-    save_total_limit
-        Maximum number of checkpoints to keep on disk.
-    load_best_model_at_end
-        Whether to reload the best checkpoint after training.
-    metric_for_best_model
-        Metric name used for best-model selection.
-    fp16
-        Enable FP16 mixed precision.
-    bf16
-        Enable BF16 mixed precision.
-    dataloader_num_workers
-        Number of data-loading worker processes.
-    dataloader_pin_memory
-        Pin memory for faster host-to-device transfer.
-    dataloader_persistent_workers
-        Keep workers alive between epochs.
-    dataloader_prefetch_factor
-        Number of batches to prefetch per worker.
-    remove_unused_columns
-        Whether the Trainer should drop columns not used by the model.
-    resume_from_checkpoint
-        Path to a checkpoint directory to resume from.
-    gradient_accumulation_steps
-        Number of forward passes before an optimiser step.
-    max_steps
-        Stop after N optimiser steps (overrides *num_train_epochs* when > 0).
-    lr_scheduler_type
-        Learning rate scheduler type.
-    torch_compile
-        Use ``torch.compile`` for fused kernels.
-    tf32
-        Enable TF32 math on Ampere+ GPUs.
-    freeze_strategy
-        Parameter freeze strategy: ``"none"``, ``"backbone"``, or ``"partial"``.
-
-        - ``"none"`` — all parameters trainable.
-        - ``"backbone"`` — freeze everything except ``fc``.
-        - ``"partial"`` — freeze everything except ``layer4`` and ``fc``.
-    extra_args
-        Additional keyword arguments forwarded to ``TrainingArguments``.
     """
 
     num_classes: int = 0
     num_frames: int = 16
-    output_dir: str = "output"
+    label_smoothing: float = 0.1
     num_train_epochs: int = 2
     per_device_train_batch_size: int = 24
     per_device_eval_batch_size: int = 24
     learning_rate: float = 1e-2
-    warmup_ratio: float = 0.1
-    weight_decay: float = 1e-4
-    label_smoothing: float = 0.1
-    logging_steps: int = 10
-    eval_strategy: str = "epoch"
-    save_strategy: str = "epoch"
-    save_total_limit: int = 2
-    load_best_model_at_end: bool = True
-    metric_for_best_model: str = "accuracy"
-    fp16: bool = False
-    bf16: bool = False
-    dataloader_num_workers: int = 4
-    dataloader_pin_memory: bool = True
-    dataloader_persistent_workers: bool = False
-    dataloader_prefetch_factor: int | None = None
-    remove_unused_columns: bool = False
-    resume_from_checkpoint: str | None = None
-    gradient_accumulation_steps: int = 1
-    max_steps: int = -1
-    lr_scheduler_type: str = "cosine"
-    torch_compile: bool = False
-    tf32: bool = False
     freeze_strategy: str = "partial"
-    extra_args: dict[str, Any] = field(default_factory=dict)
 
 
 class R2Plus1DForClassification(BaseForClassification):
@@ -205,6 +129,7 @@ class R2Plus1DModelTrainer(BaseModelTrainer):
     """
 
     model_display_name = "R2Plus1D-18"
+    model: R2Plus1DForClassification
 
     def _init_model(self) -> R2Plus1DForClassification:
         num_classes = self.config.num_classes if self.config.num_classes > 0 else self.num_labels

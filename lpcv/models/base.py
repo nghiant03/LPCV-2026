@@ -247,11 +247,13 @@ class BaseModelTrainer:
         """
         raise NotImplementedError
 
-    def _collate_fn(self, examples: list[dict]) -> dict[str, torch.Tensor]:
+    @staticmethod
+    def _collate_fn(examples: list[dict]) -> dict[str, torch.Tensor]:
         """Collate samples, permuting ``(T,C,H,W)`` → ``(C,T,H,W)``."""
         return collate_for_video(examples, permute_to_cthw=True)
 
-    def _compute_metrics(self, eval_pred: EvalPrediction) -> dict[str, float]:
+    @staticmethod
+    def _compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:
         """Compute top-1 and top-5 accuracy."""
         return compute_metrics(eval_pred)
 

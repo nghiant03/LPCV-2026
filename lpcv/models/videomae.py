@@ -242,7 +242,8 @@ class VideoMAEModelTrainer:
         else:
             logger.warning(f"Unknown freeze strategy '{strategy}', skipping")
 
-    def _compute_metrics(self, eval_pred: EvalPrediction) -> dict[str, float]:
+    @staticmethod
+    def _compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:
         """Compute top-1 and top-5 accuracy from evaluation predictions.
 
         Parameters
@@ -262,7 +263,8 @@ class VideoMAEModelTrainer:
         acc1, acc5 = topk_accuracy(logits_t, labels_t, topk=(1, 5))
         return {"accuracy": acc1.item(), "top5_accuracy": acc5.item()}
 
-    def _collate_fn(self, examples: list[dict]) -> dict[str, torch.Tensor]:
+    @staticmethod
+    def _collate_fn(examples: list[dict]) -> dict[str, torch.Tensor]:
         """Collate a list of sample dicts into a batched dict.
 
         Parameters

@@ -48,8 +48,8 @@ class ModelOutput:
         self.loss = loss
         self.logits = logits
 
-    def __getitem__(self, key: str | int) -> torch.Tensor | None:
-        if isinstance(key, int):
+    def __getitem__(self, key: str | int | slice) -> Any:
+        if isinstance(key, (int, slice)):
             return (self.loss, self.logits)[key]
         return getattr(self, key)
 

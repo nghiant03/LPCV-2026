@@ -191,6 +191,8 @@ class X3DModelTrainer(BaseModelTrainer):
         for p in model.parameters():
             if not p.is_contiguous():
                 p.data = p.data.contiguous()
+            if p.requires_grad and p.ndim == 5:
+                p.register_hook(lambda g: g.contiguous())
         return model
 
     def _apply_freeze_strategy(self, strategy: str) -> None:

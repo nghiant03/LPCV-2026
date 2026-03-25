@@ -404,7 +404,6 @@ class BaseModelTrainer:
             torch_compile=self.config.torch_compile,
             tf32=self.config.tf32,
             report_to="none",
-            ddp_find_unused_parameters=True,
             **self._extra_training_args(),
             **self.config.extra_args,
         )
@@ -436,9 +435,9 @@ class BaseModelTrainer:
         """Return additional kwargs for ``TrainingArguments``.
 
         Override in subclasses to inject model-specific arguments
-        (e.g. ``gradient_checkpointing``).
+        (e.g. ``gradient_checkpointing``, ``ddp_find_unused_parameters``).
         """
-        return {}
+        return {"ddp_find_unused_parameters": True}
 
     def _save_model(self, trainer: Trainer, path: Path) -> None:
         """Save the trained model to *path*.

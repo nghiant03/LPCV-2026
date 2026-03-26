@@ -203,8 +203,8 @@ class BaseTrainerConfig:
     bf16: bool = False
     dataloader_num_workers: int = 4
     dataloader_pin_memory: bool = True
-    dataloader_persistent_workers: bool = False
-    dataloader_prefetch_factor: int | None = None
+    dataloader_persistent_workers: bool = True
+    dataloader_prefetch_factor: int | None = 2
     remove_unused_columns: bool = False
     resume_from_checkpoint: str | None = None
     gradient_accumulation_steps: int = 1

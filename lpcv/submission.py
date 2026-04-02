@@ -386,6 +386,7 @@ def export_onnx(
                 "logits": {0: "batch_size"},
             },
             opset_version=opset_version,
+            dynamo=False,
         )
         model_proto = onnx.load(str(tmp_onnx))
 
@@ -401,19 +402,84 @@ def export_onnx(
     return onnx_dir
 
 
+def profile_on_hub(
+    model_path: str | Path | None = None,
+    device_name: str = DEFAULT_DEVICE_NAME,
+    hub_model_id: str | None = None,
+    name: str | None = None,
+) -> str:
+    """Submit a profile job for a compiled model on Qualcomm AI Hub.
+
+    Provide either *model_path* (a local ``.bin`` file) or *hub_model_id*
+    (an already-uploaded AI Hub model to reuse).
+
+    Parameters
+    ----------
+    model_path
+        Path to the compiled ``.bin`` model (input shape is already baked in).
+    device_name
+        AI Hub device name (e.g. ``"Dragonwing IQ-9075 EVK"``).
+    hub_model_id
+        Reuse an already-uploaded AI Hub model instead of uploading a local file.
+    name
+        Optional job name on AI Hub.  Auto-generated when ``None``.
+
+    Returns
+    -------
+    str
+        URL of the completed profile job.
+
+    Raises
+    ------
+    RuntimeError
+        If the profile job fails on AI Hub.
+    ValueError
+        If neither *model_path* nor *hub_model_id* is provided.
+    """
+    import qai_hub
+
+    device = qai_hub.Device(device_name)
+
+    if hub_model_id is not None:
+        logger.info(f"Reusing AI Hub model: {hub_model_id}")
+        model: str | qai_hub.Model = qai_hub.get_model(hub_model_id)
+        job_name = name or f"profile-{hub_model_id}"
+    elif model_path is not None:
+        model_path = Path(model_path)
+        logger.info(f"Uploading {model_path.name} and submitting profile job on {device_name}")
+        model = str(model_path)
+        job_name = name or f"profile-{model_path.stem}"
+    else:
+        raise ValueError("Provide either model_path or hub_model_id")
+
+    profile_job = qai_hub.submit_profile_job(
+        model=model,
+        device=device,
+        name=job_name,
+    )
+
+    status = profile_job.wait()
+    if not status.success:
+        raise RuntimeError(f"Profile job failed: {profile_job.url}")
+    logger.info(f"Profile job succeeded: {profile_job.url}")
+    return profile_job.url
+
+
 def compile_on_hub(
     model_path: str | Path,
     device_name: str = DEFAULT_DEVICE_NAME,
     num_frames: int = DEFAULT_NUM_FRAMES,
     output_dir: str | Path | None = None,
     download: bool = True,
+    hub_model_id: str | None = None,
+    name: str | None = None,
 ) -> Path | str:
     """Compile an ONNX model on Qualcomm AI Hub and download the binary.
 
     Parameters
     ----------
     model_path
-        Path to the ONNX model file.
+        Path to the ONNX model file.  Ignored when *hub_model_id* is provided.
     device_name
         AI Hub device name (e.g. ``"Dragonwing IQ-9075 EVK"``).
     num_frames
@@ -423,6 +489,11 @@ def compile_on_hub(
     download
         If ``True`` (default), download the compiled binary locally.
         If ``False``, skip the download and return the AI Hub model ID instead.
+    hub_model_id
+        If provided, reuse an already-uploaded AI Hub model instead of
+        uploading *model_path*.
+    name
+        Optional job name on AI Hub.  Auto-generated when ``None``.
 
     Returns
     -------
@@ -437,13 +508,19 @@ def compile_on_hub(
     device = qai_hub.Device(device_name)
     input_shape = (1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
 
-    logger.info(f"Uploading {model_path.name} and submitting compile job on {device_name}")
+    if hub_model_id is not None:
+        logger.info(f"Reusing AI Hub model: {hub_model_id}")
+        model: str | qai_hub.Model = qai_hub.get_model(hub_model_id)
+    else:
+        logger.info(f"Uploading {model_path.name} and submitting compile job on {device_name}")
+        model = str(model_path)
+
     compile_job = qai_hub.submit_compile_job(
-        model=str(model_path),
+        model=model,
         input_specs={"pixel_values": (input_shape, "float32")},
         device=device,
         options="--target_runtime qnn_context_binary",
-        name=model_path.stem,
+        name=name or model_path.stem,
     )
 
     assert compile_job.wait().success, f"Compile job failed: {compile_job.url}"
@@ -474,6 +551,7 @@ def run_inference_on_hub(
     device_name: str = DEFAULT_DEVICE_NAME,
     channel_last: bool = False,
     hub_model_id: str | None = None,
+    name: str | None = None,
 ) -> Path:
     """Upload preprocessed tensors and run on-device inference via AI Hub.
 
@@ -494,6 +572,8 @@ def run_inference_on_hub(
     hub_model_id
         If provided, reuse an already-uploaded AI Hub model instead of uploading
         *compiled_model_path* again.
+    name
+        Optional job name prefix on AI Hub.  Auto-generated when ``None``.
 
     Returns
     -------
@@ -542,7 +622,7 @@ def run_inference_on_hub(
         chunk = tensors[i : i + CHUNK_SIZE]
         dataset = qai_hub.upload_dataset(
             {input_name: chunk},
-            name=f"lpcv_inference_part_{i // CHUNK_SIZE + 1}",
+            name=name or f"lpcv_inference_part_{i // CHUNK_SIZE + 1}",
         )
         job = qai_hub.submit_inference_job(
             model=target_model,

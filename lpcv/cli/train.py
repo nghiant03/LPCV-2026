@@ -1,8 +1,8 @@
 """CLI sub-commands for model training.
 
-Each model type has its own sub-command (``videomae``, ``r2plus1d``, ``x3d``)
-that accepts model-specific options.  All commands share the same data-loading
-and training flow via :func:`_run_training`.
+Each model type has its own sub-command (``videomae``, ``r2plus1d``, ``x3d``,
+``tsm``) that accepts model-specific options.  All commands share the same
+data-loading and training flow via :func:`_run_training`.
 """
 
 from pathlib import Path
@@ -479,8 +479,6 @@ def x3d(
     train_preset, val_preset = make_presets(
         mean=X3D_MEAN,
         std=X3D_STD,
-        resize_height=resolved_crop,
-        resize_width=resolved_crop,
         crop_size=resolved_crop,
     )
 
@@ -513,5 +511,148 @@ def x3d(
         num_gpus=num_gpus,
         train_preset_override=train_preset,
         val_preset_override=val_preset,
+        data_percent=data_percent,
+    )
+
+
+@app.command()
+def tsm(
+    data_dir: Annotated[Path, typer.Argument(help="Path to QEVD dataset or cached DatasetDict.")],
+    output_dir: Annotated[
+        str,
+        typer.Option("--output-dir", "-o", help="Directory to save model and checkpoints."),
+    ] = "model",
+    backbone: Annotated[
+        str,
+        typer.Option(
+            "--backbone",
+            help="TSM backbone: 'resnet18' or 'resnet50'.",
+        ),
+    ] = "resnet50",
+    epochs: Annotated[
+        int,
+        typer.Option("--epochs", "-e", help="Number of training epochs."),
+    ] = 10,
+    batch_size: Annotated[
+        int,
+        typer.Option("--batch-size", "-b", help="Per-device training batch size."),
+    ] = 16,
+    learning_rate: Annotated[
+        float,
+        typer.Option("--learning-rate", "--lr", help="Learning rate."),
+    ] = 1e-2,
+    num_frames: Annotated[
+        int,
+        typer.Option("--num-frames", help="Number of temporal segments per video."),
+    ] = 8,
+    shift_div: Annotated[
+        int,
+        typer.Option("--shift-div", help="Fraction of channels to shift (default 8)."),
+    ] = 8,
+    num_workers: Annotated[
+        int,
+        typer.Option("--num-workers", "-w", help="Number of dataloader workers."),
+    ] = 4,
+    fp16: Annotated[
+        bool,
+        typer.Option("--fp16", help="Use FP16 mixed precision."),
+    ] = False,
+    bf16: Annotated[
+        bool,
+        typer.Option("--bf16", help="Use BF16 mixed precision."),
+    ] = False,
+    gradient_accumulation_steps: Annotated[
+        int,
+        typer.Option(
+            "--grad-accum", help="Gradient accumulation steps for larger effective batch size."
+        ),
+    ] = 1,
+    freeze_strategy: Annotated[
+        str,
+        typer.Option("--freeze", help="Freeze strategy: 'none', 'backbone', or 'partial'."),
+    ] = "partial",
+    label_smoothing: Annotated[
+        float,
+        typer.Option("--label-smoothing", help="Label smoothing factor for cross-entropy."),
+    ] = 0.1,
+    lr_scheduler_type: Annotated[
+        str,
+        typer.Option(
+            "--lr-scheduler",
+            help="LR scheduler: 'linear', 'cosine', 'cosine_with_restarts', 'polynomial',"
+            " 'constant', 'constant_with_warmup', or 'inverse_sqrt'.",
+        ),
+    ] = "cosine",
+    torch_compile: Annotated[
+        bool,
+        typer.Option("--compile", help="Use torch.compile for faster training."),
+    ] = False,
+    tf32: Annotated[
+        bool,
+        typer.Option("--tf32", help="Enable TF32 for faster matmuls on Ampere+ GPUs."),
+    ] = False,
+    max_steps: Annotated[
+        int,
+        typer.Option(
+            "--max-steps", help="Stop after N optimizer steps. Overrides --epochs when > 0."
+        ),
+    ] = -1,
+    resume: Annotated[
+        str | None,
+        typer.Option("--resume", help="Path to checkpoint to resume training from."),
+    ] = None,
+    decoder: Annotated[
+        str,
+        typer.Option(
+            "--decoder",
+            help="Video decoder backend: 'pyav', 'torchcodec-cpu', or 'torchcodec-nvdec'.",
+        ),
+    ] = "torchcodec-nvdec",
+    num_gpus: Annotated[
+        int,
+        typer.Option("--num-gpus", "-g", help="Number of GPUs for distributed training."),
+    ] = 1,
+    data_percent: Annotated[
+        float,
+        typer.Option(
+            "--data-percent",
+            help="Percentage of data to use (0–100]. Stratified sampling preserves class ratio.",
+        ),
+    ] = 100.0,
+) -> None:
+    """Train a TSM (Temporal Shift Module) model on the QEVD dataset."""
+    from lpcv.models.tsm import TSM_BACKBONES
+
+    if backbone not in TSM_BACKBONES:
+        available = ", ".join(sorted(TSM_BACKBONES))
+        raise typer.BadParameter(f"Unknown backbone {backbone!r}. Available: {available}")
+
+    _run_training(
+        model_name="tsm",
+        data_dir=data_dir,
+        config_overrides={
+            "backbone": backbone,
+            "num_frames": num_frames,
+            "shift_div": shift_div,
+            "output_dir": output_dir,
+            "num_train_epochs": epochs,
+            "per_device_train_batch_size": batch_size,
+            "per_device_eval_batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "label_smoothing": label_smoothing,
+            "dataloader_num_workers": num_workers,
+            "fp16": fp16,
+            "bf16": bf16,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "freeze_strategy": freeze_strategy,
+            "lr_scheduler_type": lr_scheduler_type,
+            "torch_compile": torch_compile,
+            "tf32": tf32,
+            "max_steps": max_steps,
+            "resume_from_checkpoint": resume,
+        },
+        decoder=decoder,
+        num_frames=num_frames,
+        num_gpus=num_gpus,
         data_percent=data_percent,
     )

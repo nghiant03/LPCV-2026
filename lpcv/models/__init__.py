@@ -132,8 +132,6 @@ def _register_builtins() -> None:
         train_preset, val_preset = make_presets(
             mean=X3D_MEAN,
             std=X3D_STD,
-            resize_height=default_crop,
-            resize_width=default_crop,
             crop_size=default_crop,
         )
         return ModelSpec(
@@ -147,9 +145,34 @@ def _register_builtins() -> None:
             output_extractor=lambda out: out.logits,
         )
 
+    def _load_tsm(path: str) -> nn.Module:
+        from lpcv.models.tsm import TSMForClassification
+
+        return TSMForClassification.load_pretrained(path)
+
+    def _make_tsm_spec() -> ModelSpec:
+        from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
+        from lpcv.models.tsm import TSMModelTrainer, TSMTrainerConfig
+
+        train_preset, val_preset = make_presets(
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+        )
+        return ModelSpec(
+            train_preset=train_preset,
+            val_preset=val_preset,
+            config_cls=TSMTrainerConfig,
+            trainer_cls=TSMModelTrainer,
+            loader=_load_tsm,
+            input_layout="BCTHW",
+            input_key="pixel_values",
+            output_extractor=lambda out: out.logits,
+        )
+
     register_model("videomae", _make_videomae_spec())
     register_model("r2plus1d", _make_r2plus1d_spec())
     register_model("x3d", _make_x3d_spec())
+    register_model("tsm", _make_tsm_spec())
 
 
 _register_builtins()

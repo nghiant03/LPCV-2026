@@ -76,7 +76,8 @@ lpcv/
     ├── base.py             # ModelOutput, BaseForClassification, BaseModelTrainer (shared)
     ├── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
     ├── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
-    └── x3d.py              # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
+    ├── x3d.py              # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
+    └── tpn.py              # TPNTrainerConfig + TPNModelTrainer + TPNForClassification (mmaction2)
 ```
 
 ## Architecture & Patterns
@@ -125,7 +126,7 @@ Two-stage pipeline:
 
 - `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, and output extractor for each model.
 - `register_model(name, spec)` / `get_model_spec(name)` / `list_models()` — lightweight registry.
-- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`.
+- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`.
 - CLI `train.py` uses the registry via `_run_training()` — a single generic flow that loads the spec, builds datasets with the model's presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
@@ -156,6 +157,14 @@ Two-stage pipeline:
 - `X3DTrainerConfig(BaseTrainerConfig)`: adds `preset`, `crop_size`, `num_frames`, `label_smoothing`; `resolved_num_frames()`/`resolved_crop_size()` fall back to preset defaults when 0.
 - `X3DForClassification(BaseForClassification)`: loads X3D from `facebookresearch/pytorchvideo` via `torch.hub`, replaces the head projection with a custom linear layer, swaps fixed `AvgPool3d` with `AdaptiveAvgPool3d((1,1,1))` for resolution-agnostic pooling.
 - `X3DModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` for X3D-specific freezing (`blocks.4` + `blocks.5`).
+
+### Model Training (`lpcv/models/tpn.py`)
+
+- `TPN_BACKBONES`: maps backbone names (`"tsm"`/`"slowonly"`) to mmaction2 config dicts including recognizer type, backbone config, format shape, default `num_frames` and `crop_size`.
+- `_build_tpn_model()`: builds any TPN variant via mmaction2's `MODELS.build()` registry — configures backbone, TPN neck, TPNHead, and ActionDataPreprocessor.
+- `TPNTrainerConfig(BaseTrainerConfig)`: adds `backbone`, `num_classes`, `num_frames`, `crop_size`, `label_smoothing`; `resolved_num_frames()`/`resolved_crop_size()` fall back to backbone defaults when 0.
+- `TPNForClassification(BaseForClassification)`: backbone-agnostic wrapper; handles both 2D recognizers (TSM: BCTHW → B*T,C,H,W reshape) and 3D recognizers (SlowOnly: BCTHW passthrough) via `_is_2d` flag. Forwards through mmaction2's `_run_forward(..., mode="tensor")`.
+- `TPNModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` — freezes mmaction2's inner `.backbone` sub-module (`"backbone"` = full backbone, `"partial"` = layers 1–3 frozen, layer4 trainable).
 
 ### Submission Pipeline (`lpcv/submission.py`)
 

@@ -3,11 +3,12 @@ name = "lpcv-2026"
 version = "0.1.0"
 description = "LPCVC 2026 Track 2: Video Classification with Dynamic Frame Selection"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = "==3.12.12"
 dependencies = [
     "accelerate>=1.13.0",
     "av>=14.4.0",
     "datasets>=4.6.1",
+    "editables>=0.5",
     "evaluate>=0.4.6",
     "fvcore>=0.1.5.post20221221",
     "h5py>=3.16.0",
@@ -17,7 +18,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "qai-hub>=0.46.0",
     "torch>=2.10.0",
-    "torchcodec>=0.10.0",
+    "torchcodec>=0.2.1",
     "torchvision>=0.25.0",
     "tqdm>=4.67.3",
     "transformers>=5.3.0",
@@ -42,7 +43,6 @@ dev = [
     "pyright>=1.1.408",
     "ruff>=0.15.5",
 ]
-
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

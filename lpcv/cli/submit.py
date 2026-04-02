@@ -86,6 +86,17 @@ def compile(
         bool,
         typer.Option("--no-download", help="Skip binary download; print the AI Hub model ID only."),
     ] = False,
+    hub_model_id: Annotated[
+        str | None,
+        typer.Option(
+            "--hub-model-id",
+            help="Reuse an existing AI Hub model ID instead of uploading.",
+        ),
+    ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Job name on AI Hub."),
+    ] = None,
 ) -> None:
     """Compile an ONNX model on Qualcomm AI Hub and download the binary."""
     from lpcv.submission import compile_on_hub
@@ -96,9 +107,45 @@ def compile(
         num_frames=num_frames,
         output_dir=output_dir,
         download=not no_download,
+        hub_model_id=hub_model_id,
+        name=name,
     )
     if no_download:
         logger.info(f"AI Hub model ID: {result}")
+
+
+@app.command()
+def profile(
+    compiled_model: Annotated[
+        Path,
+        typer.Argument(help="Path to the compiled .bin model (ignored with --hub-model-id)."),
+    ] = Path("."),
+    device_name: Annotated[
+        str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
+    ] = "Dragonwing IQ-9075 EVK",
+    hub_model_id: Annotated[
+        str | None,
+        typer.Option(
+            "--hub-model-id",
+            help="Reuse an existing AI Hub model ID instead of uploading.",
+        ),
+    ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Job name on AI Hub."),
+    ] = None,
+) -> None:
+    """Submit a profile job for a compiled model on Qualcomm AI Hub."""
+    from lpcv.submission import profile_on_hub
+
+    model_path = None if hub_model_id else compiled_model
+    url = profile_on_hub(
+        model_path=model_path,
+        device_name=device_name,
+        hub_model_id=hub_model_id,
+        name=name,
+    )
+    logger.info(f"Profile results: {url}")
 
 
 @app.command()
@@ -128,6 +175,10 @@ def infer(
             help="Reuse an existing AI Hub model ID instead of uploading.",
         ),
     ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Job name prefix on AI Hub."),
+    ] = None,
 ) -> None:
     """Upload tensors and run on-device inference via Qualcomm AI Hub."""
     from lpcv.submission import run_inference_on_hub
@@ -140,4 +191,5 @@ def infer(
         device_name=device_name,
         channel_last=channel_last,
         hub_model_id=hub_model_id,
+        name=name,
     )

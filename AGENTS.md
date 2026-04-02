@@ -62,7 +62,7 @@ lpcv/
 │   ├── main.py            # Typer app root, mounts sub-commands
 │   ├── data.py            # CLI: convert raw QEVD to videofolder
 │   ├── evaluate.py        # CLI: evaluate model or H5 logits
-│   ├── train.py           # CLI: train videomae / r2plus1d / x3d (generic flow)
+│   ├── train.py           # CLI: train videomae / r2plus1d / x3d / mvitv2 (generic flow)
 │   └── submit.py          # CLI: preprocess, export, compile, infer on Qualcomm AI Hub
 ├── datasets/
 │   ├── __init__.py
@@ -77,7 +77,8 @@ lpcv/
     ├── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
     ├── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
     ├── x3d.py              # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
-    └── tpn.py              # TPNTrainerConfig + TPNModelTrainer + TPNForClassification (mmaction2)
+    ├── tpn.py              # TPNTrainerConfig + TPNModelTrainer + TPNForClassification (mmaction2)
+    └── mvitv2.py           # MViTv2TrainerConfig + MViTv2ModelTrainer + MViTv2ForClassification (torchvision)
 ```
 
 ## Architecture & Patterns
@@ -126,7 +127,7 @@ Two-stage pipeline:
 
 - `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, and output extractor for each model.
 - `register_model(name, spec)` / `get_model_spec(name)` / `list_models()` — lightweight registry.
-- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`.
+- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`, `"mvitv2"`.
 - CLI `train.py` uses the registry via `_run_training()` — a single generic flow that loads the spec, builds datasets with the model's presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
@@ -165,6 +166,15 @@ Two-stage pipeline:
 - `TPNTrainerConfig(BaseTrainerConfig)`: adds `backbone`, `num_classes`, `num_frames`, `crop_size`, `label_smoothing`; `resolved_num_frames()`/`resolved_crop_size()` fall back to backbone defaults when 0.
 - `TPNForClassification(BaseForClassification)`: backbone-agnostic wrapper; handles both 2D recognizers (TSM: BCTHW → B*T,C,H,W reshape) and 3D recognizers (SlowOnly: BCTHW passthrough) via `_is_2d` flag. Forwards through mmaction2's `_run_forward(..., mode="tensor")`.
 - `TPNModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` — freezes mmaction2's inner `.backbone` sub-module (`"backbone"` = full backbone, `"partial"` = layers 1–3 frozen, layer4 trainable).
+
+### Model Training (`lpcv/models/mvitv2.py`)
+
+- `MVITV2_NUM_FRAMES = 16`, `MVITV2_CROP_SIZE = 112`: defaults matching the competition pipeline.
+- `_build_mvitv2()`: constructs MViTv2-S via `torchvision.models.video.mvit.MViT` directly (bypasses the factory to allow custom `spatial_size`). Loads Kinetics-400 pretrained weights with bicubic interpolation of `rel_pos_h`/`rel_pos_w` tables when spatial size ≠ 224.
+- `_interpolate_rel_pos()`: resizes relative positional embedding tables via bilinear interpolation to match the target spatial resolution.
+- `MViTv2TrainerConfig(BaseTrainerConfig)`: adds `num_classes`, `num_frames`, `crop_size`, `label_smoothing`; defaults to `1e-4` LR and `"partial"` freeze.
+- `MViTv2ForClassification(BaseForClassification)`: wraps torchvision MViTv2-S with resolution-aware weight loading. Replaces the classification head for the target number of classes.
+- `MViTv2ModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` — `"partial"` freezes all but the last 4 transformer blocks (12–15), norm, and head.
 
 ### Submission Pipeline (`lpcv/submission.py`)
 

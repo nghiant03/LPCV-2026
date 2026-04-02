@@ -169,10 +169,36 @@ def _register_builtins() -> None:
             output_extractor=lambda out: out.logits,
         )
 
+    def _load_mvitv2(path: str) -> nn.Module:
+        from lpcv.models.mvitv2 import MViTv2ForClassification
+
+        return MViTv2ForClassification.load_pretrained(path)
+
+    def _make_mvitv2_spec() -> ModelSpec:
+        from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
+        from lpcv.models.mvitv2 import MVITV2_CROP_SIZE, MViTv2ModelTrainer, MViTv2TrainerConfig
+
+        train_preset, val_preset = make_presets(
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+            crop_size=MVITV2_CROP_SIZE,
+        )
+        return ModelSpec(
+            train_preset=train_preset,
+            val_preset=val_preset,
+            config_cls=MViTv2TrainerConfig,
+            trainer_cls=MViTv2ModelTrainer,
+            loader=_load_mvitv2,
+            input_layout="BCTHW",
+            input_key="pixel_values",
+            output_extractor=lambda out: out.logits,
+        )
+
     register_model("videomae", _make_videomae_spec())
     register_model("r2plus1d", _make_r2plus1d_spec())
     register_model("x3d", _make_x3d_spec())
     register_model("tsm", _make_tsm_spec())
+    register_model("mvitv2", _make_mvitv2_spec())
 
 
 _register_builtins()

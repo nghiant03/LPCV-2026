@@ -4,8 +4,11 @@ Implements the Temporal Shift Module from `TSM: Temporal Shift Module for
 Efficient Video Understanding <https://arxiv.org/abs/1811.08383>`_.
 
 Uses torchvision's ``resnet18`` / ``resnet50`` as the 2D backbone with
-temporal shift inserted into each residual block.  All operations are
+temporal shift inserted into selected residual blocks.  All operations are
 standard Conv2d — no Conv3d ops, making it efficient on Qualcomm NPU.
+
+The temporal shift uses ``torch.roll`` instead of slice+pad+concat to
+minimise reshape and data-movement ops that are expensive on NPU.
 
 Provides :class:`TSMTrainerConfig`, :class:`TSMForClassification`, and
 :class:`TSMModelTrainer` following the same patterns as the R(2+1)D
@@ -45,12 +48,39 @@ TSM_BACKBONES: dict[str, dict[str, Any]] = {
 }
 """Supported 2D backbones for TSM."""
 
+ALL_LAYER_NAMES: tuple[str, ...] = ("layer1", "layer2", "layer3", "layer4")
+"""Ordered ResNet layer group names."""
+
+DEFAULT_SHIFT_LAST_N: int = 2
+"""Default: inject temporal shift into the last 2 layer groups (layer3, layer4)."""
+
+
+def _resolve_shift_layers(shift_last_n: int) -> tuple[str, ...]:
+    """Return the last *shift_last_n* ResNet layer names.
+
+    Parameters
+    ----------
+    shift_last_n
+        Number of layer groups (counted from the end) to inject temporal
+        shift into.  ``0`` disables shift; ``4`` shifts all layers.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Layer names to inject temporal shift into.
+    """
+    n = max(0, min(shift_last_n, len(ALL_LAYER_NAMES)))
+    if n == 0:
+        return ()
+    return ALL_LAYER_NAMES[-n:]
+
 
 def temporal_shift(x: torch.Tensor, num_segments: int, shift_div: int = 8) -> torch.Tensor:
-    """Perform temporal shift on feature maps.
+    """Perform temporal shift on feature maps using ``torch.roll``.
 
-    Shifts 1/shift_div of channels forward in time and 1/shift_div backward,
-    leaving the rest unchanged.  This is a zero-FLOP, zero-parameter operation.
+    Shifts 1/shift_div of channels forward in time and 1/shift_div backward
+    using ``torch.roll``, leaving the rest unchanged.  This wraps boundary
+    frames rather than zero-padding, producing a single efficient op on NPU.
 
     Parameters
     ----------
@@ -72,17 +102,10 @@ def temporal_shift(x: torch.Tensor, num_segments: int, shift_div: int = 8) -> to
 
     fold = c // shift_div
 
-    fwd_src = x[:, :-1, :fold]
-    fwd_pad = torch.zeros(b, 1, fold, h, w, device=x.device, dtype=x.dtype)
-    fwd = torch.cat([fwd_pad, fwd_src], dim=1)
+    out = x.clone()
+    out[:, :, :fold] = torch.roll(x[:, :, :fold], shifts=1, dims=1)
+    out[:, :, fold : 2 * fold] = torch.roll(x[:, :, fold : 2 * fold], shifts=-1, dims=1)
 
-    bwd_src = x[:, 1:, fold : 2 * fold]
-    bwd_pad = torch.zeros(b, 1, fold, h, w, device=x.device, dtype=x.dtype)
-    bwd = torch.cat([bwd_src, bwd_pad], dim=1)
-
-    rest = x[:, :, 2 * fold :]
-
-    out = torch.cat([fwd, bwd, rest], dim=2)
     return out.view(bt, c, h, w)
 
 
@@ -128,6 +151,10 @@ class TSMTrainerConfig(BaseTrainerConfig):
         Number of temporal segments sampled per video.
     shift_div
         Fraction of channels to shift (default 8).
+    shift_last_n
+        Number of layer groups (from the end) to inject temporal shift into.
+        ``0`` disables shift; ``4`` shifts all layers.  Default ``2`` shifts
+        ``layer3`` and ``layer4``.
     label_smoothing
         Label smoothing factor for cross-entropy loss.
     """
@@ -136,6 +163,7 @@ class TSMTrainerConfig(BaseTrainerConfig):
     num_classes: int = 0
     num_frames: int = 8
     shift_div: int = 8
+    shift_last_n: int = DEFAULT_SHIFT_LAST_N
     label_smoothing: float = 0.1
     learning_rate: float = 1e-2
     num_train_epochs: int = 10
@@ -166,6 +194,8 @@ class TSMForClassification(BaseForClassification):
         Number of temporal segments.
     shift_div
         Fraction of channels to shift.
+    shift_last_n
+        Number of layer groups (from the end) to inject temporal shift into.
     pretrained
         Load ImageNet pretrained weights for the backbone.
     label_smoothing
@@ -178,6 +208,7 @@ class TSMForClassification(BaseForClassification):
         backbone_name: str = "resnet50",
         num_frames: int = 8,
         shift_div: int = 8,
+        shift_last_n: int = DEFAULT_SHIFT_LAST_N,
         pretrained: bool = True,
         label_smoothing: float = 0.0,
     ) -> None:
@@ -191,40 +222,45 @@ class TSMForClassification(BaseForClassification):
         self.backbone = spec["factory"](weights=weights)
         self.backbone.fc = nn.Linear(spec["fc_in_features"], num_classes)
 
-        self._inject_temporal_shift(num_segments=num_frames, shift_div=shift_div)
+        shift_layers = _resolve_shift_layers(shift_last_n)
+        self._inject_temporal_shift(
+            num_segments=num_frames, shift_div=shift_div, shift_layers=shift_layers
+        )
 
         self.num_classes = num_classes
         self.backbone_name = backbone_name
         self.num_frames = num_frames
         self.shift_div = shift_div
+        self.shift_last_n = shift_last_n
         self.loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     def _inject_temporal_shift(
         self,
         num_segments: int,
         shift_div: int = 8,
+        shift_layers: tuple[str, ...] = (),
     ) -> None:
-        """Inject temporal shift into all residual blocks of a ResNet.
+        """Inject temporal shift into selected residual blocks of the backbone.
 
-        Wraps each block in ``layer1`` through ``layer4`` with
+        Wraps each block in the specified layers with
         :class:`TemporalShiftWrapper`.
 
         Parameters
         ----------
-        model
-            A torchvision ResNet model.
         num_segments
             Number of temporal segments.
         shift_div
             Fraction of channels to shift.
+        shift_layers
+            Layer names to inject temporal shift into.
         """
-        for layer_name in ("layer1", "layer2", "layer3", "layer4"):
+        for layer_name in shift_layers:
             layer = getattr(self.backbone, layer_name, None)
             if layer is None:
                 continue
             blocks = list(layer.children())
             wrapped = [TemporalShiftWrapper(b, num_segments, shift_div) for b in blocks]
-            setattr(self, layer_name, nn.Sequential(*wrapped))
+            setattr(self.backbone, layer_name, nn.Sequential(*wrapped))
 
     def forward(
         self,
@@ -261,6 +297,7 @@ class TSMForClassification(BaseForClassification):
             "backbone_name": self.backbone_name,
             "num_frames": self.num_frames,
             "shift_div": self.shift_div,
+            "shift_last_n": self.shift_last_n,
         }
 
     @classmethod
@@ -284,6 +321,7 @@ class TSMForClassification(BaseForClassification):
             backbone_name=checkpoint.get("backbone_name", "resnet50"),
             num_frames=checkpoint.get("num_frames", 8),
             shift_div=checkpoint.get("shift_div", 8),
+            shift_last_n=checkpoint.get("shift_last_n", DEFAULT_SHIFT_LAST_N),
             pretrained=False,
         )
         model.backbone.load_state_dict(checkpoint["state_dict"])
@@ -311,9 +349,11 @@ class TSMModelTrainer(BaseModelTrainer):
 
     def _init_model(self) -> TSMForClassification:
         num_classes = self.config.num_classes if self.config.num_classes > 0 else self.num_labels
+        shift_layers = _resolve_shift_layers(self.config.shift_last_n)
         logger.info(
             f"Initializing TSM ({self.config.backbone}) trainer: classes={num_classes}, "
             f"frames={self.config.num_frames}, shift_div={self.config.shift_div}, "
+            f"shift_last_n={self.config.shift_last_n} ({shift_layers}), "
             f"epochs={self.config.num_train_epochs}, freeze={self.config.freeze_strategy}"
         )
         return TSMForClassification(
@@ -321,6 +361,7 @@ class TSMModelTrainer(BaseModelTrainer):
             backbone_name=self.config.backbone,
             num_frames=self.config.num_frames,
             shift_div=self.config.shift_div,
+            shift_last_n=self.config.shift_last_n,
             pretrained=True,
             label_smoothing=self.config.label_smoothing,
         )

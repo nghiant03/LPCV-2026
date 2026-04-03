@@ -1,0 +1,3 @@
+model: videomae
+model_name: MCG-NJU/videomae-base
+num_frames: 16

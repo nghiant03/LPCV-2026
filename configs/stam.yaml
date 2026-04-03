@@ -1,0 +1,8 @@
+model: stam
+num_frames: 16
+crop_size: 112
+patch_size: 16
+embed_dim: 768
+spatial_depth: 12
+num_heads: 12
+temporal_layers: 6

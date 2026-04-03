@@ -318,11 +318,13 @@ class BaseModelTrainer:
         train_dataset: VideoDataset,
         eval_dataset: VideoDataset,
         val_transform_config: list[dict[str, Any]] | None = None,
+        model_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.val_transform_config = val_transform_config
+        self.model_config = model_config
 
         label_feature = train_dataset.features.get("label")
         if label_feature is None:
@@ -427,6 +429,11 @@ class BaseModelTrainer:
             from lpcv.transforms import save_val_transform_config
 
             save_val_transform_config(self.val_transform_config, output_path / "val_transform.json")
+
+        if self.model_config is not None:
+            from lpcv.models import save_model_config
+
+            save_model_config(self.model_config, output_path)
 
         logger.info(f"Model saved to {output_path}")
         return output_path

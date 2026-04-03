@@ -50,6 +50,37 @@ All source files use **NumPy-style docstrings** (compatible with `mkdocstrings-p
 
 LPCVC 2026 Track 2: Video Classification with Dynamic Frame Selection. Built around fine-tuning **VideoMAE** models on the QEVD (exercise/fitness video) dataset using HuggingFace Transformers + Trainer API.
 
+### Model Architecture Requirements
+
+When developing or evaluating new model architectures, they **must** meet the following on-device constraint:
+
+- **Inference latency < 34 ms** on the target device (Dragonwing IQ-9075 EVK) as reported by `uv run lpcv submit validate`.
+
+Architectures that exceed this budget should not be merged. Use the validate subcommand to verify before committing.
+
+### Checking Qualcomm AI Hub Jobs
+
+Always check QAI Hub job status and results using the **Python SDK**, not the web UI. Example:
+
+```python
+import qai_hub
+
+job = qai_hub.get_job("<job_id>")
+print(job.get_status())
+
+# For profile jobs:
+profile = job.download_profile()
+print(profile["execution_summary"]["estimated_inference_time"])  # microseconds
+
+# For compile jobs:
+job.download_target_model("output.bin")
+
+# For inference jobs:
+output = job.download_output_data()
+```
+
+Use `qai_hub.get_job()` to inspect any job by ID. Profile times are in **microseconds**.
+
 ## Project Structure
 
 ```
@@ -62,8 +93,8 @@ lpcv/
 │   ├── main.py            # Typer app root, mounts sub-commands
 │   ├── data.py            # CLI: convert raw QEVD to videofolder
 │   ├── evaluate.py        # CLI: evaluate model or H5 logits
-│   ├── train.py           # CLI: train videomae / r2plus1d / x3d / mvitv2 (generic flow)
-│   └── submit.py          # CLI: preprocess, export, compile, infer on Qualcomm AI Hub
+│   ├── train.py           # CLI: single `train` command, reads model config from YAML
+│   └── submit.py          # CLI: preprocess, export, compile, infer, validate on Qualcomm AI Hub
 ├── datasets/
 │   ├── __init__.py
 │   ├── info.py            # Constants: video extensions, split dirs, label file name, norm stats
@@ -72,7 +103,7 @@ lpcv/
 │   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder layout
 │   └── utils.py           # Video probing, remuxing, dimension checks, frame subsampling
 └── models/
-    ├── __init__.py         # ModelSpec registry + get_model_spec() / register_model()
+    ├── __init__.py         # ModelSpec registry + get_model_spec() / register_model() + YAML config load/save
     ├── base.py             # ModelOutput, BaseForClassification, BaseModelTrainer (shared)
     ├── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
     ├── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
@@ -88,6 +119,7 @@ lpcv/
 - Uses **Typer** with sub-app pattern: `main.py` mounts `data`, `train`, `evaluate`, `submit` sub-commands.
 - Heavy imports (torch, transformers, datasets) are deferred inside command functions to keep CLI startup fast.
 - All CLI parameters use `Annotated[T, typer.Option/Argument]` style.
+- **Model config via YAML**: Both `train` and `submit validate` accept a YAML config file as the first positional argument. The YAML defines model architecture params (e.g. `model`, `num_frames`, `crop_size`). Training hyperparams (epochs, lr, batch size, etc.) remain CLI options. Default configs live in `configs/<model>.yaml`.
 - **WARNING**: Functions passed to `elastic_launch` (multi-GPU training) **must** be defined at module level, not as closures or nested functions. Nested functions cannot be pickled by `torch.distributed`'s spawn-based multiprocessing and will raise `AttributeError: Can't pickle local object`. The `_launch()` function in `train.py` is intentionally at module level for this reason.
 
 ### Dataset Pipeline (`lpcv/datasets/`)
@@ -125,9 +157,11 @@ Two-stage pipeline:
 
 ### Model Registry (`lpcv/models/__init__.py`)
 
-- `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, and output extractor for each model.
+- `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, output extractor, and throwaway builder (accepts `num_classes` + `**kwargs`) for each model.
 - `register_model(name, spec)` / `get_model_spec(name)` / `list_models()` — lightweight registry.
-- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`, `"mvitv2"`.
+- `load_model_config(path)` / `save_model_config(config, output_dir)` — YAML load/save for model architecture config (`model_config.yaml`).
+- `model_config_from_trainer(model_name, config)` — extracts model-specific fields from a trainer config dataclass.
+- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`, `"mvitv2"`, `"tsm"`, `"stam"`.
 - CLI `train.py` uses the registry via `_run_training()` — a single generic flow that loads the spec, builds datasets with the model's presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
@@ -144,7 +178,7 @@ Two-stage pipeline:
 - `collate_for_video()`: shared collation with optional `(T,C,H,W)` → `(C,T,H,W)` permutation.
 - `log_freeze_stats()`: shared parameter-count logging after freezing.
 - `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, `save_pretrained()`, `_extra_save_meta()` hook.
-- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving, `ddp_find_unused_parameters=True`. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
+- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), `ddp_find_unused_parameters=True`. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
 
 ### Model Training (`lpcv/models/r2plus1d.py`)
 
@@ -187,7 +221,7 @@ Two-stage pipeline:
 
 ### Submission CLI (`lpcv/cli/submit.py`)
 
-Four subcommands under `uv run lpcv submit`:
+Five subcommands under `uv run lpcv submit`:
 
 | Command | Usage | Description |
 |---|---|---|
@@ -195,6 +229,7 @@ Four subcommands under `uv run lpcv submit`:
 | `export` | `<model_path> -o model.onnx` | Export checkpoint to ONNX with competition adapter |
 | `compile` | `<onnx_path> -o export_assets/` | Compile ONNX on Qualcomm AI Hub → `.bin` |
 | `infer` | `<tensor_dir> -c <compiled.bin>` | Upload tensors, run on-device inference on AI Hub |
+| `validate` | `<config.yaml>` | Build throwaway model, export, compile, profile on AI Hub |
 
 Typical end-to-end submission workflow:
 

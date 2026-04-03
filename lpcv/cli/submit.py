@@ -165,16 +165,13 @@ def profile(
 
 @app.command()
 def validate(
-    model_type: Annotated[
-        str,
-        typer.Argument(help="Registered model type (e.g. r2plus1d, x3d, mvitv2, tsm, videomae)."),
-    ] = "r2plus1d",
+    config: Annotated[
+        Path,
+        typer.Argument(help="Path to a model config YAML file."),
+    ],
     num_classes: Annotated[
         int, typer.Option("--num-classes", "-c", help="Number of output classes.")
     ] = 15,
-    num_frames: Annotated[
-        int, typer.Option("--num-frames", help="Temporal dimension of input.")
-    ] = 16,
     device_name: Annotated[
         str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
     ] = "Dragonwing IQ-9075 EVK",
@@ -198,17 +195,23 @@ def validate(
     ] = None,
 ) -> None:
     """Build a throwaway model, export, compile, and profile on AI Hub."""
+    from lpcv.models import load_model_config
     from lpcv.submission import validate_on_hub
+
+    model_cfg = load_model_config(config)
+    model_type = model_cfg["model"]
+    arch_params = {k: v for k, v in model_cfg.items() if k != "model"}
 
     url = validate_on_hub(
         model_type=model_type,
         num_classes=num_classes,
-        num_frames=num_frames,
+        num_frames=arch_params.get("num_frames", 16),
         device_name=device_name,
         opset_version=opset,
         dynamo=dynamo,
         decompose=decompose,
         name=name,
+        model_kwargs=arch_params,
     )
     logger.info(f"Validation complete: {url}")
 

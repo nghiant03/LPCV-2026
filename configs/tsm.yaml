@@ -1,0 +1,5 @@
+model: tsm
+backbone: resnet50
+num_frames: 8
+shift_div: 8
+shift_last_n: 2

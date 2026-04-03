@@ -371,9 +371,6 @@ def export_onnx(
 
     logger.info(f"Exporting ONNX (opset {opset_version}, dynamo={dynamo}) → {output_path}")
 
-    from lpcv.models.mvitv2 import _patch_mvitv2_rel_pos
-
-    _patch_mvitv2_rel_pos()
     if decompose:
         from lpcv.models.base import decompose_depthwise_conv3d
 
@@ -566,6 +563,7 @@ def validate_on_hub(
     dynamo: bool = False,
     decompose: bool = True,
     name: str | None = None,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> str:
     """Instantiate a model, export to ONNX, compile on AI Hub, and submit a profile job.
 
@@ -619,7 +617,7 @@ def validate_on_hub(
         raise ValueError(f"Model {model_type!r} does not have a throwaway_builder registered")
 
     logger.info(f"Building throwaway {model_type} model ({num_classes} classes)")
-    base_model = spec.throwaway_builder(num_classes)
+    base_model = spec.throwaway_builder(num_classes, **(model_kwargs or {}))
 
     device = qai_hub.Device(device_name)
 
@@ -653,9 +651,6 @@ def validate_on_hub(
 
         logger.info(f"Exporting ONNX (opset {opset_version}, dynamo={dynamo})")
 
-        from lpcv.models.mvitv2 import _patch_mvitv2_rel_pos
-
-        _patch_mvitv2_rel_pos()
         if decompose:
             from lpcv.models.base import decompose_depthwise_conv3d
 

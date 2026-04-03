@@ -1,0 +1,3 @@
+model: mvitv2
+num_frames: 16
+crop_size: 112

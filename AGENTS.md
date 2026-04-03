@@ -103,13 +103,13 @@ lpcv/
 │   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder layout
 │   └── utils.py           # Video probing, remuxing, dimension checks, frame subsampling
 └── models/
-    ├── __init__.py         # ModelSpec registry + get_model_spec() / register_model() + YAML config load/save
-    ├── base.py             # ModelOutput, BaseForClassification, BaseModelTrainer (shared)
-    ├── videomae.py         # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
-    ├── r2plus1d.py         # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
-    ├── x3d.py              # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
-    ├── tpn.py              # TPNTrainerConfig + TPNModelTrainer + TPNForClassification (mmaction2)
-    └── mvitv2.py           # MViTv2TrainerConfig + MViTv2ModelTrainer + MViTv2ForClassification (torchvision)
+    ├── __init__.py        # ModelSpec registry + get_model_spec() / register_model() + YAML config load/save
+    ├── base.py            # ModelOutput, BaseForClassification, BaseModelTrainer (shared)
+    ├── videomae.py        # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
+    ├── r2plus1d.py        # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
+    ├── x3d.py             # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
+    ├── tpn.py             # TPNTrainerConfig + TPNModelTrainer + TPNForClassification (mmaction2)
+    └── mvitv2.py          # MViTv2TrainerConfig + MViTv2ModelTrainer + MViTv2ForClassification (torchvision)
 ```
 
 ## Architecture & Patterns

@@ -33,6 +33,12 @@ from lpcv.models.base import (
 STAM_NUM_FRAMES: int = 16
 STAM_CROP_SIZE: int = 112
 
+VIT_PRETRAINED_VARIANTS: dict[int, str] = {
+    384: "vit_small_patch16_224",
+    768: "vit_base_patch16_224",
+    1024: "vit_large_patch16_224",
+}
+
 
 def _trunc_normal_(tensor: torch.Tensor, std: float = 0.02) -> torch.Tensor:
     """Fill *tensor* with values drawn from a truncated normal distribution."""
@@ -554,7 +560,14 @@ def _build_stam(
         try:
             from timm.models import create_model  # type: ignore[import-untyped]
 
-            vit = create_model("vit_base_patch16_224", pretrained=True)
+            variant = VIT_PRETRAINED_VARIANTS.get(embed_dim)
+            if variant is None:
+                logger.warning(
+                    f"No pretrained ViT variant for embed_dim={embed_dim}, "
+                    f"available: {sorted(VIT_PRETRAINED_VARIANTS)}"
+                )
+                return model
+            vit = create_model(variant, pretrained=True)
             vit_sd = vit.state_dict()
 
             spatial_sd = model.spatial.state_dict()
@@ -562,7 +575,7 @@ def _build_stam(
             for k, v in spatial_sd.items():
                 if k in vit_sd and vit_sd[k].shape == v.shape:
                     new_sd[k] = vit_sd[k]
-                elif k == "pos_embed" and k in vit_sd:
+                elif k == "pos_embed" and k in vit_sd and vit_sd[k].shape[-1] == v.shape[-1]:
                     new_sd[k] = _interpolate_pos_embed(vit_sd[k], 224, img_size, patch_size)
                 else:
                     new_sd[k] = v

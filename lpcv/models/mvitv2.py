@@ -150,6 +150,123 @@ def _interpolate_rel_pos(
     return new_sd
 
 
+def _add_rel_pos_no_einsum(
+    attn: torch.Tensor,
+    q: torch.Tensor,
+    q_thw: tuple[int, int, int],
+    k_thw: tuple[int, int, int],
+    rel_pos_h: torch.Tensor,
+    rel_pos_w: torch.Tensor,
+    rel_pos_t: torch.Tensor,
+) -> torch.Tensor:
+    """Einsum-free version of ``torchvision.models.video.mvit._add_rel_pos``.
+
+    Replaces the two ``torch.einsum`` calls with equivalent ``reshape`` +
+    ``torch.matmul`` sequences so that the ONNX graph contains only standard
+    ``MatMul`` ops (no ``Einsum``), which improves compatibility with
+    Qualcomm AI Hub and other edge compilers.
+
+    Parameters
+    ----------
+    attn
+        Attention matrix of shape ``(B, n_head, N, N)`` where ``N = 1 + THW``.
+    q
+        Query tensor of shape ``(B, n_head, N, dim)``.
+    q_thw
+        Query temporal, height, width dimensions ``(q_t, q_h, q_w)``.
+    k_thw
+        Key temporal, height, width dimensions ``(k_t, k_h, k_w)``.
+    rel_pos_h
+        Height relative position embedding table.
+    rel_pos_w
+        Width relative position embedding table.
+    rel_pos_t
+        Temporal relative position embedding table.
+
+    Returns
+    -------
+    torch.Tensor
+        Updated attention matrix with relative position bias added.
+    """
+    from torchvision.models.video.mvit import _interpolate
+
+    q_t, q_h, q_w = q_thw
+    k_t, k_h, k_w = k_thw
+    dh = int(2 * max(q_h, k_h) - 1)
+    dw = int(2 * max(q_w, k_w) - 1)
+    dt = int(2 * max(q_t, k_t) - 1)
+
+    q_h_ratio = max(k_h / q_h, 1.0)
+    k_h_ratio = max(q_h / k_h, 1.0)
+    dist_h = (
+        torch.arange(q_h)[:, None] * q_h_ratio
+        - (torch.arange(k_h)[None, :] + (1.0 - k_h)) * k_h_ratio
+    )
+    q_w_ratio = max(k_w / q_w, 1.0)
+    k_w_ratio = max(q_w / k_w, 1.0)
+    dist_w = (
+        torch.arange(q_w)[:, None] * q_w_ratio
+        - (torch.arange(k_w)[None, :] + (1.0 - k_w)) * k_w_ratio
+    )
+    q_t_ratio = max(k_t / q_t, 1.0)
+    k_t_ratio = max(q_t / k_t, 1.0)
+    dist_t = (
+        torch.arange(q_t)[:, None] * q_t_ratio
+        - (torch.arange(k_t)[None, :] + (1.0 - k_t)) * k_t_ratio
+    )
+
+    rel_pos_h = _interpolate(rel_pos_h, dh)
+    rel_pos_w = _interpolate(rel_pos_w, dw)
+    rel_pos_t = _interpolate(rel_pos_t, dt)
+    rh = rel_pos_h[dist_h.long()]  # [q_h, k_h, dim]
+    rw = rel_pos_w[dist_w.long()]  # [q_w, k_w, dim]
+    rt = rel_pos_t[dist_t.long()]  # [q_t, k_t, dim]
+
+    b, n_head, _, dim = q.shape
+    r_q = q[:, :, 1:].reshape(b, n_head, q_t, q_h, q_w, dim)
+
+    # einsum("bythwc,hkc->bythwk") via bmm with h as batch dim:
+    #   r_q [b,H,q_t,q_h,q_w,dim] -> [q_h, b*H*q_t*q_w, dim]
+    #   rh  [q_h, k_h, dim]        -> [q_h, dim, k_h]
+    #   bmm -> [q_h, b*H*q_t*q_w, k_h] -> [b,H,q_t,q_h,q_w,k_h]
+    r_q_h = r_q.permute(3, 0, 1, 2, 4, 5).reshape(q_h, b * n_head * q_t * q_w, dim)
+    rel_h_q = torch.bmm(r_q_h, rh.transpose(1, 2))
+    rel_h_q = rel_h_q.view(q_h, b, n_head, q_t, q_w, k_h).permute(1, 2, 3, 0, 4, 5)
+
+    # einsum("bythwc,wkc->bythwk") via bmm with w as batch dim:
+    #   r_q [b,H,q_t,q_h,q_w,dim] -> [q_w, b*H*q_t*q_h, dim]
+    #   rw  [q_w, k_w, dim]        -> [q_w, dim, k_w]
+    #   bmm -> [q_w, b*H*q_t*q_h, k_w] -> [b,H,q_t,q_h,q_w,k_w]
+    r_q_w = r_q.permute(4, 0, 1, 2, 3, 5).reshape(q_w, b * n_head * q_t * q_h, dim)
+    rel_w_q = torch.bmm(r_q_w, rw.transpose(1, 2))
+    rel_w_q = rel_w_q.view(q_w, b, n_head, q_t, q_h, k_w).permute(1, 2, 3, 4, 0, 5)
+
+    r_q_flat = r_q.permute(2, 0, 1, 3, 4, 5).reshape(q_t, b * n_head * q_h * q_w, dim)
+    rel_q_t = torch.matmul(r_q_flat, rt.transpose(1, 2)).transpose(0, 1)
+    rel_q_t = rel_q_t.view(b, n_head, q_h, q_w, q_t, k_t).permute(0, 1, 4, 2, 3, 5)
+
+    rel_pos = (
+        rel_h_q[:, :, :, :, :, None, :, None]
+        + rel_w_q[:, :, :, :, :, None, None, :]
+        + rel_q_t[:, :, :, :, :, :, None, None]
+    ).reshape(b, n_head, q_t * q_h * q_w, k_t * k_h * k_w)
+
+    attn[:, :, 1:, 1:] += rel_pos
+    return attn
+
+
+def _patch_mvitv2_rel_pos() -> None:
+    """Monkey-patch ``torchvision.models.video.mvit._add_rel_pos``.
+
+    Replaces the upstream implementation (which uses ``torch.einsum``) with
+    :func:`_add_rel_pos_no_einsum` so that exported ONNX graphs contain only
+    ``MatMul`` ops instead of ``Einsum``.
+    """
+    import torchvision.models.video.mvit as _mvit_mod
+
+    _mvit_mod._add_rel_pos = _add_rel_pos_no_einsum  # type: ignore[attr-defined]
+
+
 def _build_mvitv2(
     num_classes: int,
     spatial_size: int = 112,

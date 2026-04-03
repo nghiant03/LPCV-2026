@@ -111,8 +111,6 @@ class TemporalShiftWrapper(nn.Module):
         return self.block(x)
 
 
-
-
 @dataclass
 class TSMTrainerConfig(BaseTrainerConfig):
     """Hyperparameters for a TSM training run.

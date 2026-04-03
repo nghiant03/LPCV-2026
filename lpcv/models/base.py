@@ -447,3 +447,146 @@ class BaseModelTrainer:
         that use ``trainer.save_model()``.
         """
         self.model.save_pretrained(path)  # type: ignore[union-attr]
+
+
+class DecomposedDepthwiseConv3d(nn.Module):
+    """Depthwise 3D convolution decomposed into spatial 2D + temporal 1D.
+
+    Equivalent to ``Conv3d(C, C, kernel, stride, padding, groups=C)`` but
+    expressed as a ``Conv2d`` (spatial) followed by a ``Conv1d`` (temporal),
+    both depthwise.  This avoids the unsupported depthwise-3D-conv op on
+    Qualcomm AI Hub while preserving the learned weights.
+
+    Parameters
+    ----------
+    channels
+        Number of input/output channels (same as ``groups``).
+    kernel_size
+        3-element list ``[k_t, k_h, k_w]``.
+    stride
+        3-element list ``[s_t, s_h, s_w]``.
+    padding
+        3-element list ``[p_t, p_h, p_w]``.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: list[int],
+        stride: list[int],
+        padding: list[int],
+    ) -> None:
+        super().__init__()
+        k_t, k_h, k_w = kernel_size
+        s_t, s_h, s_w = stride
+        p_t, p_h, p_w = padding
+        self.channels = channels
+
+        self.spatial = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=(k_h, k_w),
+            stride=(s_h, s_w),
+            padding=(p_h, p_w),
+            groups=channels,
+            bias=False,
+        )
+        self.temporal = nn.Conv1d(
+            channels,
+            channels,
+            kernel_size=k_t,
+            stride=s_t,
+            padding=p_t,
+            groups=channels,
+            bias=False,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply spatial conv then temporal conv.
+
+        Parameters
+        ----------
+        x
+            Tensor of shape ``(B, C, T, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape ``(B, C, T', H', W')``.
+        """
+        bx, c, t, h, w = x.shape
+        x = x.permute(0, 2, 1, 3, 4).reshape(bx * t, c, h, w)
+        x = self.spatial(x)
+        h2, w2 = x.shape[2], x.shape[3]
+        x = x.view(bx, t, c, h2, w2).permute(0, 3, 4, 2, 1).reshape(bx * h2 * w2, c, t)
+        x = self.temporal(x)
+        t2 = x.shape[2]
+        x = x.view(bx, h2, w2, c, t2).permute(0, 3, 4, 1, 2)
+        return x
+
+    @classmethod
+    def from_conv3d(cls, conv3d: nn.Conv3d) -> DecomposedDepthwiseConv3d:
+        """Build from an existing ``Conv3d`` and copy its weights.
+
+        The 3D kernel ``(C, 1, k_t, k_h, k_w)`` is decomposed by summing
+        over the temporal axis for the spatial kernel and over spatial axes
+        for the temporal kernel, then rescaling so the product approximates
+        the original.
+
+        Parameters
+        ----------
+        conv3d
+            Source depthwise ``Conv3d`` with ``groups == in_channels``.
+
+        Returns
+        -------
+        DecomposedDepthwiseConv3d
+            Initialised module with weights derived from *conv3d*.
+        """
+        c = conv3d.in_channels
+        k = [int(x) for x in conv3d.kernel_size]
+        s = [int(x) for x in conv3d.stride]
+        p = [int(x) for x in conv3d.padding]  # type: ignore[union-attr]
+        mod = cls(channels=c, kernel_size=k, stride=s, padding=p)
+
+        with torch.no_grad():
+            w3d = conv3d.weight  # (C, 1, k_t, k_h, k_w)
+            w_spatial = w3d.sum(dim=2)  # (C, 1, k_h, k_w)
+            w_temporal = w3d.sum(dim=(3, 4))  # (C, 1, k_t)
+            scale = (1.0 / (k[0] * k[1] * k[2])) ** 0.5
+            mod.spatial.weight.copy_(w_spatial * (scale * k[0] ** 0.5))
+            mod.temporal.weight.copy_(w_temporal * (scale * (k[1] * k[2]) ** 0.5))
+
+        return mod
+
+
+def decompose_depthwise_conv3d(model: nn.Module) -> int:
+    """Replace all depthwise ``Conv3d`` layers in *model* with 2D+1D decompositions.
+
+    Walks every sub-module and swaps any ``Conv3d`` where
+    ``groups == in_channels == out_channels`` with a
+    :class:`DecomposedDepthwiseConv3d`.
+
+    Parameters
+    ----------
+    model
+        Any ``nn.Module`` tree.
+
+    Returns
+    -------
+    int
+        Number of ``Conv3d`` layers replaced.
+    """
+    replaced = 0
+    for parent_name, parent in list(model.named_modules()):
+        for attr_name, child in list(parent.named_children()):
+            if (
+                isinstance(child, nn.Conv3d)
+                and child.groups == child.in_channels
+                and child.in_channels == child.out_channels
+            ):
+                setattr(parent, attr_name, DecomposedDepthwiseConv3d.from_conv3d(child))
+                replaced += 1
+                full_name = f"{parent_name}.{attr_name}" if parent_name else attr_name
+                logger.info(f"Decomposed depthwise Conv3d: {full_name}")
+    return replaced

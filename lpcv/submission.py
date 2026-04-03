@@ -311,6 +311,8 @@ def export_onnx(
     model_type: str = "r2plus1d",
     num_frames: int = DEFAULT_NUM_FRAMES,
     opset_version: int = 18,
+    dynamo: bool = False,
+    decompose: bool = True,
 ) -> Path:
     """Wrap a trained checkpoint with the auto-built adapter and export to ONNX.
 
@@ -330,6 +332,10 @@ def export_onnx(
         Temporal dimension of the input tensor.
     opset_version
         ONNX opset version.
+    dynamo
+        Use the ``torch.export``-based ONNX exporter instead of TorchScript.
+        Eliminates dynamic control-flow ops (``Loop``, ``If``, ``SequenceEmpty``)
+        that some backends do not support.
 
     Returns
     -------
@@ -363,7 +369,15 @@ def export_onnx(
 
     dummy_input = torch.randn(1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
 
-    logger.info(f"Exporting ONNX (opset {opset_version}) → {output_path}")
+    logger.info(f"Exporting ONNX (opset {opset_version}, dynamo={dynamo}) → {output_path}")
+
+    from lpcv.models.mvitv2 import _patch_mvitv2_rel_pos
+
+    _patch_mvitv2_rel_pos()
+    if decompose:
+        from lpcv.models.base import decompose_depthwise_conv3d
+
+        decompose_depthwise_conv3d(wrapped)
 
     onnx_dir = output_path.parent / f"{output_path.stem}.onnx"
     if onnx_dir.exists():
@@ -386,7 +400,7 @@ def export_onnx(
                 "logits": {0: "batch_size"},
             },
             opset_version=opset_version,
-            dynamo=False,
+            dynamo=dynamo,
         )
         model_proto = onnx.load(str(tmp_onnx))
 
@@ -541,6 +555,165 @@ def compile_on_hub(
     bin_path = Path(target_model.download(str(output_dir / f"{model_path.stem}.bin")))
     logger.info(f"Compiled binary saved to {bin_path}")
     return bin_path
+
+
+def validate_on_hub(
+    model_type: str = "r2plus1d",
+    num_classes: int = 92,
+    num_frames: int = DEFAULT_NUM_FRAMES,
+    device_name: str = DEFAULT_DEVICE_NAME,
+    opset_version: int = 18,
+    dynamo: bool = False,
+    decompose: bool = True,
+    name: str | None = None,
+) -> str:
+    """Instantiate a model, export to ONNX, compile on AI Hub, and submit a profile job.
+
+    Creates a throwaway instance of the specified model architecture with random
+    weights, wraps it with the competition adapter, exports to ONNX, compiles
+    on AI Hub (without downloading the binary), and finally submits a profile
+    job on the compiled model.
+
+    This is a quick end-to-end smoke test to verify that a model architecture
+    can pass through the entire submission pipeline on real hardware.
+
+    Parameters
+    ----------
+    model_type
+        Registered model name (e.g. ``"r2plus1d"``, ``"x3d"``, ``"mvitv2"``).
+    num_classes
+        Number of output classes for the throwaway model.
+    num_frames
+        Temporal dimension of the input tensor.
+    device_name
+        Qualcomm AI Hub device name.
+    opset_version
+        ONNX opset version.
+    dynamo
+        Use the ``torch.export``-based ONNX exporter instead of TorchScript.
+        Eliminates dynamic control-flow ops (``Loop``, ``If``, ``SequenceEmpty``)
+        that some backends do not support.
+    name
+        Optional job name prefix on AI Hub.  Auto-generated when ``None``.
+
+    Returns
+    -------
+    str
+        URL of the completed profile job.
+
+    Raises
+    ------
+    KeyError
+        If *model_type* is not registered.
+    RuntimeError
+        If the compile or profile job fails on AI Hub.
+    """
+    import qai_hub
+
+    from lpcv.models import get_model_spec
+
+    spec = get_model_spec(model_type)
+    job_prefix = name or f"validate-{model_type}"
+
+    if spec.throwaway_builder is None:
+        raise ValueError(f"Model {model_type!r} does not have a throwaway_builder registered")
+
+    logger.info(f"Building throwaway {model_type} model ({num_classes} classes)")
+    base_model = spec.throwaway_builder(num_classes)
+
+    device = qai_hub.Device(device_name)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        base_model.save_pretrained(tmp_path)  # type: ignore[attr-defined]
+
+        from lpcv.transforms import save_val_transform_config
+
+        save_val_transform_config(spec.val_preset, tmp_path / "val_transform.json")
+
+        wrapped = CompetitionAdapter.from_saved_config(
+            model=base_model,
+            model_path=tmp_path,
+            input_layout=spec.input_layout,
+            input_key=spec.input_key,
+            output_extractor=spec.output_extractor,
+        )
+        wrapped.eval()
+
+        dummy = torch.randn(1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+        onnx_dir = tmp_path / f"{model_type}.onnx"
+        onnx_dir.mkdir()
+        inner_onnx = onnx_dir / f"{model_type}.onnx"
+        data_file = f"{model_type}.data"
+
+        tmp_export = tmp_path / "tmp_export"
+        tmp_export.mkdir()
+        tmp_onnx = tmp_export / "model.onnx"
+
+        logger.info(f"Exporting ONNX (opset {opset_version}, dynamo={dynamo})")
+
+        from lpcv.models.mvitv2 import _patch_mvitv2_rel_pos
+
+        _patch_mvitv2_rel_pos()
+        if decompose:
+            from lpcv.models.base import decompose_depthwise_conv3d
+
+            decompose_depthwise_conv3d(wrapped)
+
+        torch.onnx.export(
+            wrapped,
+            (dummy,),
+            str(tmp_onnx),
+            input_names=["pixel_values"],
+            output_names=["logits"],
+            dynamic_axes={
+                "pixel_values": {0: "batch_size"},
+                "logits": {0: "batch_size"},
+            },
+            opset_version=opset_version,
+            dynamo=dynamo,
+        )
+        model_proto = onnx.load(str(tmp_onnx))
+        onnx.save(
+            model_proto,
+            str(inner_onnx),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=data_file,
+        )
+
+        input_shape = (1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+
+        logger.info(f"Submitting compile job on {device_name}")
+        compile_job = qai_hub.submit_compile_job(
+            model=str(onnx_dir),
+            input_specs={"pixel_values": (input_shape, "float32")},
+            device=device,
+            options="--target_runtime qnn_context_binary",
+            name=f"{job_prefix}-compile",
+        )
+
+        assert compile_job.wait().success, f"Compile job failed: {compile_job.url}"
+        logger.info(f"Compile job succeeded: {compile_job.url}")
+
+        target_model = compile_job.get_target_model()
+        assert target_model is not None
+        model_id: str = target_model.model_id
+        logger.info(f"Compiled model ID: {model_id}")
+
+    logger.info("Submitting profile job")
+    profile_job = qai_hub.submit_profile_job(
+        model=qai_hub.get_model(model_id),
+        device=device,
+        name=f"{job_prefix}-profile",
+    )
+
+    status = profile_job.wait()
+    if not status.success:
+        raise RuntimeError(f"Profile job failed: {profile_job.url}")
+    logger.info(f"Profile job succeeded: {profile_job.url}")
+    return profile_job.url
 
 
 def run_inference_on_hub(

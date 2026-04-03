@@ -38,6 +38,9 @@ class ModelSpec:
         Keyword argument name for the model's forward method.
     output_extractor
         Extracts logits from the model's raw output.
+    throwaway_builder
+        ``(num_classes: int) -> nn.Module`` — builds a throwaway instance
+        with random weights for pipeline validation.
     """
 
     train_preset: list[dict[str, Any]]
@@ -48,6 +51,7 @@ class ModelSpec:
     input_layout: str = "BCTHW"
     input_key: str = "pixel_values"
     output_extractor: Callable[..., Any] = field(default_factory=lambda: lambda out: out.logits)
+    throwaway_builder: Callable[[int], nn.Module] | None = None
 
 
 _REGISTRY: dict[str, ModelSpec] = {}
@@ -86,6 +90,12 @@ def _register_builtins() -> None:
 
         return VideoMAEForVideoClassification.from_pretrained(path)
 
+    def _build_videomae_throwaway(num_classes: int) -> nn.Module:
+        from transformers import VideoMAEConfig, VideoMAEForVideoClassification
+
+        config = VideoMAEConfig(num_labels=num_classes)
+        return VideoMAEForVideoClassification(config)
+
     def _make_videomae_spec() -> ModelSpec:
         from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
 
@@ -98,12 +108,18 @@ def _register_builtins() -> None:
             input_layout="BTCHW",
             input_key="pixel_values",
             output_extractor=lambda out: out.logits,
+            throwaway_builder=_build_videomae_throwaway,
         )
 
     def _load_r2plus1d(path: str) -> nn.Module:
         from lpcv.models.r2plus1d import R2Plus1DForClassification
 
         return R2Plus1DForClassification.load_pretrained(path)
+
+    def _build_r2plus1d_throwaway(num_classes: int) -> nn.Module:
+        from lpcv.models.r2plus1d import R2Plus1DForClassification
+
+        return R2Plus1DForClassification(num_classes=num_classes, pretrained=False)
 
     def _make_r2plus1d_spec() -> ModelSpec:
         from lpcv.models.r2plus1d import R2Plus1DModelTrainer, R2Plus1DTrainerConfig
@@ -117,12 +133,18 @@ def _register_builtins() -> None:
             input_layout="BCTHW",
             input_key="pixel_values",
             output_extractor=lambda out: out.logits,
+            throwaway_builder=_build_r2plus1d_throwaway,
         )
 
     def _load_x3d(path: str) -> nn.Module:
         from lpcv.models.x3d import X3DForClassification
 
         return X3DForClassification.load_pretrained(path)
+
+    def _build_x3d_throwaway(num_classes: int) -> nn.Module:
+        from lpcv.models.x3d import X3DForClassification
+
+        return X3DForClassification(num_classes=num_classes, pretrained=False)
 
     def _make_x3d_spec() -> ModelSpec:
         from lpcv.datasets.info import X3D_MEAN, X3D_STD
@@ -143,12 +165,18 @@ def _register_builtins() -> None:
             input_layout="BCTHW",
             input_key="pixel_values",
             output_extractor=lambda out: out.logits,
+            throwaway_builder=_build_x3d_throwaway,
         )
 
     def _load_tsm(path: str) -> nn.Module:
         from lpcv.models.tsm import TSMForClassification
 
         return TSMForClassification.load_pretrained(path)
+
+    def _build_tsm_throwaway(num_classes: int) -> nn.Module:
+        from lpcv.models.tsm import TSMForClassification
+
+        return TSMForClassification(num_classes=num_classes, pretrained=False)
 
     def _make_tsm_spec() -> ModelSpec:
         from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
@@ -167,12 +195,18 @@ def _register_builtins() -> None:
             input_layout="BCTHW",
             input_key="pixel_values",
             output_extractor=lambda out: out.logits,
+            throwaway_builder=_build_tsm_throwaway,
         )
 
     def _load_mvitv2(path: str) -> nn.Module:
         from lpcv.models.mvitv2 import MViTv2ForClassification
 
         return MViTv2ForClassification.load_pretrained(path)
+
+    def _build_mvitv2_throwaway(num_classes: int) -> nn.Module:
+        from lpcv.models.mvitv2 import MViTv2ForClassification
+
+        return MViTv2ForClassification(num_classes=num_classes, pretrained=False)
 
     def _make_mvitv2_spec() -> ModelSpec:
         from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
@@ -192,6 +226,7 @@ def _register_builtins() -> None:
             input_layout="BCTHW",
             input_key="pixel_values",
             output_extractor=lambda out: out.logits,
+            throwaway_builder=_build_mvitv2_throwaway,
         )
 
     register_model("videomae", _make_videomae_spec())

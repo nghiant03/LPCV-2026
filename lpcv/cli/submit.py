@@ -57,6 +57,19 @@ def export(
         int, typer.Option("--num-frames", help="Temporal dimension of input.")
     ] = 16,
     opset: Annotated[int, typer.Option("--opset", help="ONNX opset version.")] = 18,
+    dynamo: Annotated[
+        bool,
+        typer.Option(
+            "--dynamo", help="Use torch.export-based ONNX exporter (flattens control flow)."
+        ),
+    ] = False,
+    decompose: Annotated[
+        bool,
+        typer.Option(
+            "--decompose/--no-decompose",
+            help="Replace depthwise 3D convs with 2D+1D decompositions.",
+        ),
+    ] = True,
 ) -> None:
     """Export a trained model checkpoint to ONNX with competition adapter."""
     from lpcv.submission import export_onnx
@@ -67,6 +80,8 @@ def export(
         model_type=model_type,
         num_frames=num_frames,
         opset_version=opset,
+        dynamo=dynamo,
+        decompose=decompose,
     )
 
 
@@ -146,6 +161,56 @@ def profile(
         name=name,
     )
     logger.info(f"Profile results: {url}")
+
+
+@app.command()
+def validate(
+    model_type: Annotated[
+        str,
+        typer.Argument(help="Registered model type (e.g. r2plus1d, x3d, mvitv2, tsm, videomae)."),
+    ] = "r2plus1d",
+    num_classes: Annotated[
+        int, typer.Option("--num-classes", "-c", help="Number of output classes.")
+    ] = 15,
+    num_frames: Annotated[
+        int, typer.Option("--num-frames", help="Temporal dimension of input.")
+    ] = 16,
+    device_name: Annotated[
+        str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
+    ] = "Dragonwing IQ-9075 EVK",
+    opset: Annotated[int, typer.Option("--opset", help="ONNX opset version.")] = 18,
+    dynamo: Annotated[
+        bool,
+        typer.Option(
+            "--dynamo", help="Use torch.export-based ONNX exporter (flattens control flow)."
+        ),
+    ] = False,
+    decompose: Annotated[
+        bool,
+        typer.Option(
+            "--decompose/--no-decompose",
+            help="Replace depthwise 3D convs with 2D+1D decompositions.",
+        ),
+    ] = True,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Job name prefix on AI Hub."),
+    ] = None,
+) -> None:
+    """Build a throwaway model, export, compile, and profile on AI Hub."""
+    from lpcv.submission import validate_on_hub
+
+    url = validate_on_hub(
+        model_type=model_type,
+        num_classes=num_classes,
+        num_frames=num_frames,
+        device_name=device_name,
+        opset_version=opset,
+        dynamo=dynamo,
+        decompose=decompose,
+        name=name,
+    )
+    logger.info(f"Validation complete: {url}")
 
 
 @app.command()

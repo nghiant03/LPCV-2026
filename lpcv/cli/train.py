@@ -11,8 +11,6 @@ from typing import Annotated, Any
 import typer
 from loguru import logger
 
-app = typer.Typer(help="Model training operations.")
-
 
 def _launch(
     model_name: str,
@@ -109,7 +107,6 @@ def _run_training(
         _launch(model_name, config, train_ds, eval_ds, val_preset, model_config)
 
 
-@app.callback(invoke_without_command=True)
 def train(
     data_dir: Annotated[
         Path,

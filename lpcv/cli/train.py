@@ -1,7 +1,8 @@
 """CLI sub-command for model training.
 
-A single ``train`` command loads model architecture from a YAML config
-(``--config``) and accepts training hyperparameters as CLI options.
+A single ``train`` command that accepts ``--model`` and/or ``--config``
+to select the architecture.  ``--model`` overrides the ``model`` key in
+the YAML when both are provided.
 """
 
 from pathlib import Path
@@ -110,14 +111,18 @@ def _run_training(
 
 @app.callback(invoke_without_command=True)
 def train(
-    config: Annotated[
-        Path,
-        typer.Argument(help="Path to a model config YAML file."),
-    ],
     data_dir: Annotated[
         Path,
-        typer.Option("--data-dir", "-d", help="Path to QEVD dataset or cached DatasetDict."),
-    ] = Path("./data/qevd"),
+        typer.Argument(help="Path to QEVD dataset or cached DatasetDict."),
+    ],
+    model: Annotated[
+        str,
+        typer.Option("--model", "-m", help="Model name."),
+    ] = "",
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Path to a model config YAML file."),
+    ] = None,
     output_dir: Annotated[
         str,
         typer.Option("--output-dir", "-o", help="Directory to save model and checkpoints."),
@@ -201,13 +206,34 @@ def train(
         ),
     ] = 100.0,
 ) -> None:
-    """Train a model using architecture from a YAML config file."""
-    from lpcv.models import load_model_config
+    """Train a model.
 
-    model_cfg = load_model_config(config)
-    model_name = model_cfg["model"]
+    Provide ``--model`` to select the architecture directly, ``--config``
+    to load from a YAML file, or both (``--model`` wins).
+    """
+    from lpcv.models import list_models, load_model_config
 
-    arch_params = {k: v for k, v in model_cfg.items() if k != "model"}
+    arch_params: dict[str, Any] = {}
+    model_cfg: dict[str, Any] | None = None
+
+    if config is not None:
+        model_cfg = load_model_config(config)
+        arch_params = {k: v for k, v in model_cfg.items() if k != "model"}
+
+    model_name = model or (model_cfg["model"] if model_cfg else "")
+
+    if not model_name:
+        available = ", ".join(list_models())
+        raise typer.BadParameter(
+            f"Specify --model or --config (with a 'model' key). Available models: {available}"
+        )
+
+    if model_name and model_cfg and model_name != model_cfg.get("model"):
+        logger.info(f"--model={model_name!r} overrides config model={model_cfg['model']!r}")
+        model_cfg["model"] = model_name
+
+    if model_cfg is None:
+        model_cfg = {"model": model_name}
 
     config_overrides: dict[str, Any] = {
         **arch_params,

@@ -653,7 +653,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "qai-hub", specifier = ">=0.46.0" },
     { name = "torch", specifier = ">=2.10.0" },
-    { name = "torchcodec", specifier = ">=0.2.1", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torchcodec", specifier = "<0.11", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", specifier = ">=0.25.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "transformers", specifier = ">=5.3.0" },
@@ -1604,11 +1604,11 @@ wheels = [
 
 [[package]]
 name = "torchcodec"
-version = "0.11.0+cu128"
+version = "0.10.0+cu128"
 source = { registry = "https://download.pytorch.org/whl/cu128" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu128/torchcodec-0.11.0%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:fe1bf61ebeb68450bf5c19b56dd55b016541a114ed30f4b06d20ee764fb51593" },
-    { url = "https://download.pytorch.org/whl/cu128/torchcodec-0.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:8a6b3de55fa7856b06cb7b8e4f95cc59240caaf27bb98c5cf83ce384c742a206" },
+    { url = "https://download.pytorch.org/whl/cu128/torchcodec-0.10.0%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:bef47589149b941b296b0448855ad89269784015f735afd446264dd7367c7883" },
+    { url = "https://download.pytorch.org/whl/cu128/torchcodec-0.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:5ecb4aeb61b4f14f30ceed11ce892308f38232d82eee64605ae19583c51a8e72" },
 ]
 
 [[package]]

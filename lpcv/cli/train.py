@@ -71,12 +71,6 @@ def _run_training(
     decoder_kwargs: dict[str, str | int | None] = {}
     if decoder == "torchcodec-nvdec":
         pin_memory = False
-        if config_overrides["dataloader_num_workers"] > 0:
-            config_overrides["dataloader_multiprocessing_context"] = "spawn"
-            logger.info(
-                "torchcodec-nvdec will use DataLoader multiprocessing_context='spawn' "
-                "to avoid CUDA initialization failures in worker processes"
-            )
         if num_gpus > 1:
             decoder_kwargs["num_gpus"] = num_gpus
             logger.info(f"NVDEC multi-GPU enabled: distributing decoding across {num_gpus} GPUs")

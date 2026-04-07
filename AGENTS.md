@@ -120,6 +120,7 @@ lpcv/
 - Heavy imports (torch, transformers, datasets) are deferred inside command functions to keep CLI startup fast.
 - All CLI parameters use `Annotated[T, typer.Option/Argument]` style.
 - The `train` CLI exposes `--gradient-checkpointing/--no-gradient-checkpointing` for every trainer via the shared `BaseTrainerConfig`.
+- `train --decoder torchcodec-nvdec` validates that `--num-workers` matches `--num-gpus` so each decode worker maps cleanly to one GPU, and forces DataLoader workers to use the `spawn` start method because CUDA/NVDEC initialization is unsafe in forked workers.
 - **Model config via YAML**: Both `train` and `submit validate` accept a YAML config file as the first positional argument. The YAML defines model architecture params (e.g. `model`, `num_frames`, `crop_size`). Training hyperparams (epochs, lr, batch size, etc.) remain CLI options. Default configs live in `configs/<model>.yaml`.
 - **WARNING**: Functions passed to `elastic_launch` (multi-GPU training) **must** be defined at module level, not as closures or nested functions. Nested functions cannot be pickled by `torch.distributed`'s spawn-based multiprocessing and will raise `AttributeError: Can't pickle local object`. The `_launch()` function in `train.py` is intentionally at module level for this reason.
 
@@ -174,12 +175,12 @@ Two-stage pipeline:
 ### Shared Model Base (`lpcv/models/base.py`)
 
 - `ModelOutput`: lightweight output wrapper with `.loss` and `.logits` — supports attribute, dict, and index access for HF Trainer compatibility.
-- `BaseTrainerConfig`: shared training hyperparameters (~28 fields) inherited by all model configs. Subclasses add model-specific fields and override defaults.
+- `BaseTrainerConfig`: shared training hyperparameters (~29 fields) inherited by all model configs. Subclasses add model-specific fields and override defaults.
 - `compute_metrics()`: shared top-1/top-5 accuracy computation.
 - `collate_for_video()`: shared collation with optional `(T,C,H,W)` → `(C,T,H,W)` permutation.
 - `log_freeze_stats()`: shared parameter-count logging after freezing.
-- `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, `save_pretrained()`, `_extra_save_meta()` hook.
-- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), `ddp_find_unused_parameters=True`. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
+- `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, HuggingFace-compatible `gradient_checkpointing_enable()` / `gradient_checkpointing_disable()`, `save_pretrained()`, and `_extra_save_meta()` hook. Checkpointing is applied generically around the wrapped backbone during training.
+- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), `ddp_find_unused_parameters=True`, and custom DataLoader multiprocessing context overrides when required by a decoder/runtime. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
 
 ### Model Training (`lpcv/models/r2plus1d.py`)
 

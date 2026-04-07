@@ -71,6 +71,12 @@ def _run_training(
     decoder_kwargs: dict[str, str | int | None] = {}
     if decoder == "torchcodec-nvdec":
         pin_memory = False
+        if config_overrides["dataloader_num_workers"] > 0:
+            config_overrides["dataloader_multiprocessing_context"] = "spawn"
+            logger.info(
+                "torchcodec-nvdec will use DataLoader multiprocessing_context='spawn' "
+                "to avoid CUDA initialization failures in worker processes"
+            )
         if num_gpus > 1:
             decoder_kwargs["num_gpus"] = num_gpus
             logger.info(f"NVDEC multi-GPU enabled: distributing decoding across {num_gpus} GPUs")
@@ -155,12 +161,12 @@ def train(
         ),
     ] = 1,
     gradient_checkpointing: Annotated[
-        bool | None,
+        bool,
         typer.Option(
-            "--gradient-checkpointing/--no-gradient-checkpointing",
+            "--grad-checkpoint",
             help="Override model gradient checkpointing when supported by the selected trainer.",
         ),
-    ] = None,
+    ] = False,
     freeze_strategy: Annotated[
         str,
         typer.Option("--freeze", help="Freeze strategy: 'none', 'backbone', or 'partial'."),
@@ -216,6 +222,13 @@ def train(
     to load from a YAML file, or both (``--model`` wins).
     """
     from lpcv.models import list_models, load_model_config
+
+    if decoder == "torchcodec-nvdec" and num_workers != num_gpus:
+        logger.warning(
+            "torchcodec-nvdec requires --num-workers to match --num-gpus so each "
+            f"decode worker maps cleanly onto one GPU. Settings num_workers to {num_gpus}"
+        )
+        num_workers = num_gpus
 
     arch_params: dict[str, Any] = {}
     model_cfg: dict[str, Any] | None = None

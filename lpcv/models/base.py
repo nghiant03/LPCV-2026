@@ -172,6 +172,10 @@ class BaseTrainerConfig:
         Path to a checkpoint directory to resume from.
     gradient_accumulation_steps
         Number of forward passes before an optimiser step.
+    gradient_checkpointing
+        Enable activation checkpointing when the model supports it. For custom
+        wrappers without an implementation, the request is accepted and logged
+        as a no-op to keep the shared Trainer flow consistent.
     max_steps
         Stop after N optimiser steps (overrides *num_train_epochs* when > 0).
     lr_scheduler_type
@@ -208,6 +212,7 @@ class BaseTrainerConfig:
     remove_unused_columns: bool = False
     resume_from_checkpoint: str | None = None
     gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = False
     max_steps: int = -1
     lr_scheduler_type: str = "cosine"
     torch_compile: bool = False
@@ -401,6 +406,7 @@ class BaseModelTrainer:
             dataloader_prefetch_factor=self.config.dataloader_prefetch_factor,
             remove_unused_columns=self.config.remove_unused_columns,
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            gradient_checkpointing=self.config.gradient_checkpointing,
             max_steps=self.config.max_steps,
             lr_scheduler_type=self.config.lr_scheduler_type,
             torch_compile=self.config.torch_compile,
@@ -444,7 +450,9 @@ class BaseModelTrainer:
         Override in subclasses to inject model-specific arguments
         (e.g. ``gradient_checkpointing``, ``ddp_find_unused_parameters``).
         """
-        return {"ddp_find_unused_parameters": True}
+        return {
+            "ddp_find_unused_parameters": True,
+        }
 
     def _save_model(self, trainer: Trainer, path: Path) -> None:
         """Save the trained model to *path*.

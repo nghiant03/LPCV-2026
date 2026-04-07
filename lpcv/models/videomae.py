@@ -8,7 +8,7 @@ custom collation, metrics, and checkpoint saving).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from loguru import logger
 from transformers import Trainer, VideoMAEForVideoClassification
@@ -39,13 +39,10 @@ class VideoMAETrainerConfig(BaseTrainerConfig):
         HuggingFace model identifier or local path.
     num_frames
         Number of frames sampled per video.
-    gradient_checkpointing
-        Trade compute for memory by recomputing activations.
     """
 
     model_name: str = "MCG-NJU/videomae-base"
     num_frames: int = 16
-    gradient_checkpointing: bool = False
     num_train_epochs: int = 15
     learning_rate: float = 5e-5
     weight_decay: float = 0.05
@@ -136,9 +133,6 @@ class VideoMAEModelTrainer(BaseModelTrainer):
     def _collate_fn(examples: list[dict]) -> dict[str, torch.Tensor]:
         """Collate samples without layout permutation (VideoMAE expects BTCHW)."""
         return collate_for_video(examples, permute_to_cthw=False)
-
-    def _extra_training_args(self) -> dict[str, Any]:
-        return {"gradient_checkpointing": self.config.gradient_checkpointing}
 
     def _save_model(self, trainer: Trainer, path: Path) -> None:
         trainer.save_model(str(path))

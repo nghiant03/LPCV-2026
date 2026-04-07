@@ -119,6 +119,7 @@ lpcv/
 - Uses **Typer** with sub-app pattern: `main.py` mounts `data`, `train`, `evaluate`, `submit` sub-commands.
 - Heavy imports (torch, transformers, datasets) are deferred inside command functions to keep CLI startup fast.
 - All CLI parameters use `Annotated[T, typer.Option/Argument]` style.
+- The `train` CLI exposes `--gradient-checkpointing/--no-gradient-checkpointing` for every trainer via the shared `BaseTrainerConfig`.
 - **Model config via YAML**: Both `train` and `submit validate` accept a YAML config file as the first positional argument. The YAML defines model architecture params (e.g. `model`, `num_frames`, `crop_size`). Training hyperparams (epochs, lr, batch size, etc.) remain CLI options. Default configs live in `configs/<model>.yaml`.
 - **WARNING**: Functions passed to `elastic_launch` (multi-GPU training) **must** be defined at module level, not as closures or nested functions. Nested functions cannot be pickled by `torch.distributed`'s spawn-based multiprocessing and will raise `AttributeError: Can't pickle local object`. The `_launch()` function in `train.py` is intentionally at module level for this reason.
 
@@ -166,7 +167,7 @@ Two-stage pipeline:
 
 ### Model Training (`lpcv/models/videomae.py`)
 
-- `VideoMAETrainerConfig(BaseTrainerConfig)`: adds `model_name`, `num_frames`, `gradient_checkpointing`; overrides defaults (15 epochs, 5e-5 LR, linear scheduler).
+- `VideoMAETrainerConfig(BaseTrainerConfig)`: adds `model_name`, `num_frames`; overrides defaults (15 epochs, 5e-5 LR, linear scheduler). Gradient checkpointing now comes from shared `BaseTrainerConfig`.
 - `VideoMAEModelTrainer(BaseModelTrainer)`: wraps HuggingFace `Trainer`. Handles model loading via `from_pretrained`, freeze strategies (`none`/`backbone`/`partial`), BTCHW collation (no permute), and `trainer.save_model()` for checkpoints.
 - Multi-GPU via `torch.distributed.launcher.api.elastic_launch` (configured in CLI).
 

@@ -154,6 +154,13 @@ def train(
             "--grad-accum", help="Gradient accumulation steps for larger effective batch size."
         ),
     ] = 1,
+    gradient_checkpointing: Annotated[
+        bool | None,
+        typer.Option(
+            "--gradient-checkpointing/--no-gradient-checkpointing",
+            help="Override model gradient checkpointing when supported by the selected trainer.",
+        ),
+    ] = None,
     freeze_strategy: Annotated[
         str,
         typer.Option("--freeze", help="Freeze strategy: 'none', 'backbone', or 'partial'."),
@@ -247,6 +254,8 @@ def train(
         "max_steps": max_steps,
         "resume_from_checkpoint": resume,
     }
+    if gradient_checkpointing is not None:
+        config_overrides["gradient_checkpointing"] = gradient_checkpointing
     if learning_rate > 0.0:
         config_overrides["learning_rate"] = learning_rate
     if freeze_strategy:

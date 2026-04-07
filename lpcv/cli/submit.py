@@ -171,7 +171,7 @@ def validate(
     ],
     num_classes: Annotated[
         int, typer.Option("--num-classes", "-c", help="Number of output classes.")
-    ] = 15,
+    ] = 92,
     device_name: Annotated[
         str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
     ] = "Dragonwing IQ-9075 EVK",

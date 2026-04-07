@@ -3,6 +3,6 @@ num_frames: 16
 crop_size: 112
 patch_size: 16
 embed_dim: 384
-spatial_depth: 12
+spatial_depth: 16
 num_heads: 6
-temporal_layers: 4
+temporal_layers: 6

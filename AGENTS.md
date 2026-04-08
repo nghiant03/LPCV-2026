@@ -149,22 +149,24 @@ Two-stage pipeline:
 - All transforms operate on `torch.Tensor` with shape `(T, C, H, W)`.
 - `VideoTransformCallable` wraps a `Compose` pipeline for use with HF `set_transform`.
 - Default presets match the LPCVC reference solution (R2+1D norm, 128×171 resize, 112×112 crop):
-  - `COMPETITION_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112). Single source of truth for the competition's fixed pipeline; used by `preprocess_dataset()` and `extract_adapter_steps()`.
+  - `COMPETITION_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112). Single source of truth for the competition's fixed pipeline; used by `preprocess_dataset()` and export-contract generation.
   - `TRAIN_PRESET` — ScalePixels → Resize(128,171) → RandomHorizontalFlip → Normalize(R2+1D) → RandomCrop(112).
   - `VAL_PRESET` — alias for `COMPETITION_PRESET`.
 - `make_x3d_presets(crop_size)` — dynamically builds X3D train/val presets (X3D norm, short-side scale, crop) for a given spatial size.
 - `save_val_transform_config()` / `load_val_transform_config()` — persist val transform config as JSON alongside model checkpoints.
-- `extract_adapter_steps()` — diffs a saved val config against the competition pipeline; returns only the extra steps needed for the ONNX adapter.
+- `build_export_config()` / `save_export_config()` / `load_export_config()` — convert a supported val config into an explicit ONNX adapter contract (`export_config.json`) and persist it alongside checkpoints/exports.
 - Registered transforms: `FromVideo`, `UniformTemporalSubsample`, `ScalePixels`, `Normalize`, `RandomShortSideScale`, `ShortSideScale`, `RandomCrop`, `CenterCrop`, `RandomHorizontalFlip`, `Resize`.
 
 ### Model Registry (`lpcv/models/__init__.py`)
 
-- `ModelSpec` dataclass: bundles train/val presets, config class, trainer class, loader, input layout, input key, output extractor, and throwaway builder (accepts `num_classes` + `**kwargs`) for each model.
+- `ModelSpec` dataclass: bundles default presets, config class, trainer class, loader, input layout, input key, output extractor, throwaway builder, plus model-specific config resolution / preset-building / `num_frames` resolution hooks for each registered model.
 - `register_model(name, spec)` / `get_model_spec(name)` / `list_models()` — lightweight registry.
-- `load_model_config(path)` / `save_model_config(config, output_dir)` — YAML load/save for model architecture config (`model_config.yaml`).
+- `resolve_model_config(model_name, raw_config)` — resolves defaults and validation through the registry into an explicit model config plus derived train/val presets and `num_frames`.
+- `load_model_config(path)` / `save_model_config(config, output_dir)` — YAML load/save for model architecture config (`model_config.yaml`); passing a saved model directory loads `model_config.yaml` from the artifact root.
+- Saved-artifact metadata filenames are centralized here: `model_config.yaml`, `val_transform.json`, and `export_config.json`.
 - `model_config_from_trainer(model_name, config)` — extracts model-specific fields from a trainer config dataclass.
 - Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`, `"mvitv2"`, `"tsm"`, `"stam"`.
-- CLI `train.py` uses the registry via `_run_training()` — a single generic flow that loads the spec, builds datasets with the model's presets, and delegates to the spec's trainer class.
+- CLI `train.py` uses the registry via `_run_training()` — a single generic flow that resolves the model config through the registry, builds datasets with the resolved presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
 
@@ -180,7 +182,7 @@ Two-stage pipeline:
 - `collate_for_video()`: shared collation with optional `(T,C,H,W)` → `(C,T,H,W)` permutation.
 - `log_freeze_stats()`: shared parameter-count logging after freezing.
 - `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, HuggingFace-compatible `gradient_checkpointing_enable()` / `gradient_checkpointing_disable()`, `save_pretrained()`, and `_extra_save_meta()` hook. Checkpointing is applied generically around the wrapped backbone during training.
-- `BaseModelTrainer`: shared HF Trainer wrapper — handles label extraction, TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), `ddp_find_unused_parameters=True`, and custom DataLoader multiprocessing context overrides when required by a decoder/runtime. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
+- `BaseModelTrainer`: shared HF Trainer wrapper — reads `train_dataset.label_names`, handles TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), export-contract saving (`export_config.json`), `ddp_find_unused_parameters=True`, and custom DataLoader multiprocessing context overrides when required by a decoder/runtime. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
 
 ### Model Training (`lpcv/models/r2plus1d.py`)
 
@@ -215,9 +217,9 @@ Two-stage pipeline:
 ### Submission Pipeline (`lpcv/submission.py`)
 
 - `preprocess_dataset()`: decodes videos to `(1,3,T,112,112)` `.npy` tensors using competition's fixed R(2+1)D normalization pipeline. Writes a `manifest.jsonl` mapping tensor paths to labels.
-- `CompetitionAdapter`: `nn.Module` that adapts competition input (BCTHW, 112×112, R2+1D norm) to any model's expected format. Handles re-normalization, resize, and layout permutation in-graph. Auto-built from `val_transform.json` via `CompetitionAdapter.from_saved_config()` — no hardcoded registry needed.
-- `export_onnx()`: loads model via `ModelSpec.loader`, wraps with `CompetitionAdapter`, exports ONNX with external data.
-- `compile_on_hub()`: uploads ONNX to Qualcomm AI Hub, submits compile job targeting `qnn_context_binary`, downloads `.bin`.
+- `CompetitionAdapter`: `nn.Module` that adapts competition input (BCTHW, 112×112, R2+1D norm) to any model's expected format. Handles only the supported deterministic export contract: optional re-normalization, resize, center crop, and layout permutation. It is built from `export_config.json`, not by diffing transform step lists.
+- `export_onnx()`: loads model via `ModelSpec.loader`, infers model type / `num_frames` from the saved artifact by default, wraps with `CompetitionAdapter`, exports ONNX with external data, and writes `export_config.json` into the ONNX output directory.
+- `compile_on_hub()`: uploads ONNX to Qualcomm AI Hub, infers `num_frames` from the exported ONNX metadata by default, submits compile job targeting `qnn_context_binary`, downloads `.bin`.
 - `run_inference_on_hub()`: loads tensors from manifest, uploads in chunks of 538 (≤2GB flatbuffer limit), submits inference jobs, collects logits into HDF5.
 - Key constants: `DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"`, `CHUNK_SIZE = 538`, `FRAME_RATE = 4`, `COMPETITION_SPATIAL_SIZE = 112`.
 
@@ -228,10 +230,10 @@ Five subcommands under `uv run lpcv submit`:
 | Command | Usage | Description |
 |---|---|---|
 | `preprocess` | `<data_dir> <output_dir>` | Decode videos → `.npy` tensors + `manifest.jsonl` |
-| `export` | `<model_path> -o model.onnx` | Export checkpoint to ONNX with competition adapter |
-| `compile` | `<onnx_path> -o export_assets/` | Compile ONNX on Qualcomm AI Hub → `.bin` |
+| `export` | `<model_path> -o model.onnx` | Export checkpoint to ONNX with competition adapter; model type and `num_frames` default to saved artifact metadata |
+| `compile` | `<onnx_path> -o export_assets/` | Compile ONNX on Qualcomm AI Hub → `.bin`; `num_frames` defaults to exported ONNX metadata |
 | `infer` | `<tensor_dir> -c <compiled.bin>` | Upload tensors, run on-device inference on AI Hub |
-| `validate` | `<config.yaml>` | Build throwaway model, export, compile, profile on AI Hub |
+| `validate` | `<config.yaml>` | Resolve model config through the registry, build a throwaway model, export, compile, and profile on AI Hub |
 
 Typical end-to-end submission workflow:
 
@@ -258,7 +260,7 @@ uv run lpcv evaluate h5 ./inference_results.h5 ./tensors/manifest.jsonl ./class_
 - `load_logits_h5()`: loads logits from HDF5 files.
 - `load_labels_from_manifest()`: reads ground-truth labels from JSONL manifest + class map JSON.
 - `evaluate_h5()`: end-to-end evaluation from H5 logit files.
-- `evaluate_model()`: end-to-end inference on a dataset using a saved model checkpoint.
+- `evaluate_model()`: end-to-end inference on a dataset using any registered saved model checkpoint; batching/collation follows the model registry's input layout and key.
 
 ## Coding Conventions
 

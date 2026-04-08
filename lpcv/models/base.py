@@ -308,7 +308,7 @@ class BaseModelTrainer:
     config
         Trainer config dataclass with training hyperparameters.
     train_dataset
-        Training dataset with a ``features["label"]`` attribute.
+        Training dataset with a ``label_names`` attribute.
     eval_dataset
         Evaluation dataset with the same schema.
     val_transform_config
@@ -331,10 +331,7 @@ class BaseModelTrainer:
         self.val_transform_config = val_transform_config
         self.model_config = model_config
 
-        label_feature = train_dataset.features.get("label")
-        if label_feature is None:
-            raise ValueError("Dataset must have a 'label' feature for label metadata")
-        self.label_names: list[str] = label_feature.names
+        self.label_names = list(train_dataset.label_names)
         self.num_labels = len(self.label_names)
 
         self.model = self._init_model()
@@ -432,9 +429,23 @@ class BaseModelTrainer:
         self._save_model(trainer, output_path)
 
         if self.val_transform_config is not None:
-            from lpcv.transforms import save_val_transform_config
+            from lpcv.models import EXPORT_CONFIG_FILENAME, VAL_TRANSFORM_FILENAME
+            from lpcv.transforms import (
+                build_export_config,
+                save_export_config,
+                save_val_transform_config,
+            )
 
-            save_val_transform_config(self.val_transform_config, output_path / "val_transform.json")
+            save_val_transform_config(
+                self.val_transform_config, output_path / VAL_TRANSFORM_FILENAME
+            )
+            export_config = build_export_config(
+                self.val_transform_config,
+                input_layout=getattr(self, "input_layout", "BCTHW"),
+                input_key=getattr(self, "input_key", "pixel_values"),
+                num_frames=getattr(self.config, "num_frames", 16),
+            )
+            save_export_config(export_config, output_path / EXPORT_CONFIG_FILENAME)
 
         if self.model_config is not None:
             from lpcv.models import save_model_config

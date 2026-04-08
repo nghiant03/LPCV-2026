@@ -13,9 +13,9 @@ Built-in presets:
 - ``TRAIN_PRESET`` / ``VAL_PRESET`` — default presets matching the LPCVC
   reference solution.
 
-Each trainer saves the val transform config alongside the model checkpoint
-so the submission adapter can be auto-built from the difference between
-the saved config and the competition's fixed pipeline.
+Each trainer saves the val transform config alongside the model checkpoint.
+The submission pipeline converts supported validation transforms into an
+explicit adapter contract for ONNX export.
 """
 
 from __future__ import annotations
@@ -424,7 +424,7 @@ TRAIN_PRESET, VAL_PRESET = make_presets()
 
 
 # ---------------------------------------------------------------------------
-# Save / load / diff utilities
+# Save / load / export-contract utilities
 # ---------------------------------------------------------------------------
 
 
@@ -465,41 +465,115 @@ def load_val_transform_config(path: str | Path) -> list[dict[str, Any]]:
         return json.load(f)
 
 
-def extract_adapter_steps(
-    val_config: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Extract transform steps that differ from the competition pipeline.
+def _normalise_spatial_step(step: dict[str, Any]) -> dict[str, int]:
+    """Return explicit ``height``/``width`` values for a spatial transform step."""
+    height = int(step["height"])
+    width = int(step.get("width", height))
+    return {"height": height, "width": width}
 
-    The competition's fixed pipeline is:
 
-    1. ``ScalePixels``
-    2. ``Resize(128, 171)``
-    3. ``Normalize(R2PLUS1D_MEAN, R2PLUS1D_STD)``
-    4. ``CenterCrop(112)``
+def _parse_supported_val_config(val_config: list[dict[str, Any]]) -> dict[str, Any]:
+    """Parse a supported validation transform config into explicit components.
 
-    Any step in *val_config* that is **not** in this baseline is returned
-    as an adapter step that must be applied on top of the competition
-    output to reproduce the model's expected input.
-
-    When the val config exactly matches the competition pipeline an empty
-    list is returned (no adapter needed).
-
-    Parameters
-    ----------
-    val_config
-        Saved validation transform config.
-
-    Returns
-    -------
-    list[dict[str, Any]]
-        Steps that deviate from the competition pipeline.  The submission
-        adapter should apply these in-graph.
+    Supported validation transforms are the deterministic subset used by the
+    current model registry: ``ScalePixels``, ``Resize``, ``Normalize``, and
+    ``CenterCrop``.
     """
-    if val_config == COMPETITION_PRESET:
-        return []
+    parsed: dict[str, Any] = {
+        "scale_pixels": None,
+        "resize": None,
+        "normalize": None,
+        "center_crop": None,
+    }
 
-    extra: list[dict[str, Any]] = []
     for step in val_config:
-        if step not in COMPETITION_PRESET:
-            extra.append(step)
-    return extra
+        name = step["name"]
+        if name == "ScalePixels":
+            scale = float(step.get("scale", 255.0))
+            if scale != 255.0:
+                raise ValueError(f"Unsupported ScalePixels value {scale}. Expected 255.0.")
+            parsed["scale_pixels"] = scale
+        elif name == "Resize":
+            parsed["resize"] = _normalise_spatial_step(step)
+        elif name == "Normalize":
+            parsed["normalize"] = {
+                "mean": [float(x) for x in step["mean"]],
+                "std": [float(x) for x in step["std"]],
+            }
+        elif name == "CenterCrop":
+            parsed["center_crop"] = _normalise_spatial_step(step)
+        else:
+            raise ValueError(
+                f"Unsupported validation transform {name!r} for export. "
+                "Only ScalePixels, Resize, Normalize, and CenterCrop are supported."
+            )
+
+    return parsed
+
+
+def build_export_config(
+    val_config: list[dict[str, Any]],
+    *,
+    input_layout: str = "BCTHW",
+    input_key: str = "pixel_values",
+    num_frames: int = 16,
+) -> dict[str, Any]:
+    """Build an explicit ONNX adapter contract from a validation config.
+
+    The returned config describes only the transforms that must be applied on
+    top of the competition input tensor. Unsupported validation transforms
+    raise ``ValueError`` instead of being approximated silently.
+    """
+    baseline = _parse_supported_val_config(COMPETITION_PRESET)
+    parsed = _parse_supported_val_config(val_config)
+    resize_diff = parsed["resize"] != baseline["resize"]
+    crop_diff = parsed["center_crop"] != baseline["center_crop"]
+
+    target_resize = parsed["resize"] if resize_diff else None
+    target_crop = parsed["center_crop"] if (crop_diff or resize_diff) else None
+
+    if target_crop is not None:
+        crop_h = int(target_crop["height"])
+        crop_w = int(target_crop["width"])
+        resize_h = int(target_resize["height"]) if target_resize is not None else 112
+        resize_w = int(target_resize["width"]) if target_resize is not None else 112
+        if crop_h > resize_h or crop_w > resize_w:
+            raise ValueError(
+                "Unsupported validation crop "
+                f"{target_crop} after resize "
+                f"{target_resize or {'height': 112, 'width': 112}}."
+            )
+
+    return {
+        "num_frames": int(num_frames),
+        "input_layout": input_layout,
+        "input_key": input_key,
+        "source_spatial_size": {"height": 112, "width": 112},
+        "source_normalization": {
+            "mean": [float(x) for x in R2PLUS1D_MEAN],
+            "std": [float(x) for x in R2PLUS1D_STD],
+        },
+        "target_resize": target_resize,
+        "target_crop": target_crop,
+        "target_normalization": (
+            parsed["normalize"] if parsed["normalize"] != baseline["normalize"] else None
+        ),
+    }
+
+
+def save_export_config(config: dict[str, Any], path: str | Path) -> None:
+    """Save an export adapter config to JSON."""
+    import json
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
+
+def load_export_config(path: str | Path) -> dict[str, Any]:
+    """Load an export adapter config from JSON."""
+    import json
+
+    with open(Path(path), encoding="utf-8") as f:
+        return json.load(f)

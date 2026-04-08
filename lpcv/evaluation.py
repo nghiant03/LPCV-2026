@@ -192,6 +192,7 @@ def evaluate_h5(
 
 
 def evaluate_model(
+    model_type: str,
     model_path: str | Path,
     eval_ds: VideoDataset,
     batch_size: int = 8,
@@ -199,9 +200,9 @@ def evaluate_model(
 ) -> dict[str, float]:
     """Run end-to-end inference on a dataset and compute accuracy.
 
-    Loads a saved ``VideoMAEForVideoClassification`` checkpoint, runs batched
-    forward passes on the provided evaluation dataset, and returns clip-level
-    and video-level top-1 / top-5 accuracy.
+    Loads a saved checkpoint through the model registry, runs batched forward
+    passes on the provided evaluation dataset, and returns clip-level and
+    video-level top-1 / top-5 accuracy.
 
     When *clips_per_video* > 1 the dataset is sampled multiple times per video.
     The softmax probabilities of all clips belonging to the same video are
@@ -210,6 +211,8 @@ def evaluate_model(
 
     Parameters
     ----------
+    model_type
+        Registered model name for the saved checkpoint.
     model_path
         Path to the saved model directory (contains config + weights).
     eval_ds
@@ -229,16 +232,28 @@ def evaluate_model(
         "video_top1_accuracy", "video_top5_accuracy"}`` as percentages.
     """
     from torch.utils.data import DataLoader
-    from transformers import VideoMAEForVideoClassification
+
+    from lpcv.models import get_model_spec
+    from lpcv.models.base import collate_for_video
 
     model_path = Path(model_path)
-    model = VideoMAEForVideoClassification.from_pretrained(str(model_path))
+    spec = get_model_spec(model_type)
+    model = spec.loader(str(model_path))
     model.eval()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)  # type: ignore[assignment]
 
-    loader = DataLoader(eval_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    loader = DataLoader(
+        eval_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=lambda examples: collate_for_video(
+            examples,
+            permute_to_cthw=spec.input_layout == "BCTHW",
+        ),
+    )
 
     all_logits: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
@@ -249,9 +264,9 @@ def evaluate_model(
         labels = batch["labels"]
 
         with torch.no_grad():
-            outputs = model(pixel_values=pixel_values)
+            outputs = model(**{spec.input_key: pixel_values})
 
-        all_logits.append(outputs.logits.cpu())
+        all_logits.append(spec.output_extractor(outputs).cpu())
         all_labels.append(labels)
 
     logits_t = torch.cat(all_logits, dim=0)

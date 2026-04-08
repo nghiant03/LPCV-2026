@@ -7,9 +7,9 @@ Provides:
 - :func:`compile_on_hub` — compile an ONNX model on Qualcomm AI Hub.
 - :func:`run_inference_on_hub` — upload tensors and run on-device inference.
 
-The adapter layer is automatically constructed from the ``val_transform.json``
-saved alongside each model checkpoint.  Steps that differ from the competition's
-fixed pipeline are baked into the ONNX graph.
+The adapter layer is built from an explicit ``export_config.json`` saved
+alongside each model checkpoint. Export and compile default to artifact-owned
+metadata instead of restated CLI flags.
 """
 
 from __future__ import annotations
@@ -149,16 +149,11 @@ def preprocess_dataset(
 
 
 class CompetitionAdapter(torch.nn.Module):
-    """Adapter that converts competition input to any video model's expected format.
+    """Adapter that converts competition input to a model's expected format.
 
     The competition feeds ``(B, C, T, H, W)`` tensors at 112x112, normalized
-    with R(2+1)D mean/std.  When the model's validation pipeline differs from
-    the competition pipeline, this adapter undoes the competition transforms
-    and applies the model's expected transforms — all in-graph for ONNX export.
-
-    When the model's val pipeline matches the competition pipeline exactly
-    (i.e. no adapter steps), this module is a thin pass-through that only
-    handles the layout permutation and model forward call.
+    with R(2+1)D mean/std. The saved export config describes the deterministic
+    delta between that tensor and the model's expected validation input.
     """
 
     src_mean: torch.Tensor
@@ -169,46 +164,47 @@ class CompetitionAdapter(torch.nn.Module):
     def __init__(
         self,
         model: torch.nn.Module,
-        adapter_steps: list[dict[str, Any]],
-        input_layout: str = "BCTHW",
-        input_key: str = "pixel_values",
+        export_config: dict[str, Any],
         output_extractor: Callable[..., torch.Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.model = model
-        self.input_layout = input_layout
-        self.input_key = input_key
+        self.input_layout = str(export_config["input_layout"])
+        self.input_key = str(export_config["input_key"])
         self.output_extractor = output_extractor or (lambda out: out.logits)
 
-        self._needs_renorm = False
-        self._needs_resize = False
-        self._target_spatial = COMPETITION_SPATIAL_SIZE
+        self.target_resize = export_config.get("target_resize")
+        self.target_crop = export_config.get("target_crop")
+        self.target_normalization = export_config.get("target_normalization")
 
-        src_mean = [0.0, 0.0, 0.0]
-        src_std = [1.0, 1.0, 1.0]
+        source_normalization = export_config["source_normalization"]
+        self._needs_renorm = self.target_normalization is not None
+        self._needs_resize = self.target_resize is not None
+        self._needs_crop = self.target_crop is not None
+
+        self.register_buffer(
+            "src_mean",
+            torch.tensor(source_normalization["mean"], dtype=torch.float32).view(1, 3, 1, 1, 1),
+        )
+        self.register_buffer(
+            "src_std",
+            torch.tensor(source_normalization["std"], dtype=torch.float32).view(1, 3, 1, 1, 1),
+        )
+
         dst_mean = [0.0, 0.0, 0.0]
         dst_std = [1.0, 1.0, 1.0]
+        if self.target_normalization is not None:
+            dst_mean = self.target_normalization["mean"]
+            dst_std = self.target_normalization["std"]
 
-        for step in adapter_steps:
-            name = step["name"]
-            if name == "Normalize":
-                self._needs_renorm = True
-                dst_mean = step["mean"]
-                dst_std = step["std"]
-            elif name in ("Resize", "CenterCrop", "RandomCrop"):
-                self._needs_resize = True
-                self._target_spatial = step["height"]
-
-        if self._needs_renorm:
-            from lpcv.datasets.info import R2PLUS1D_MEAN, R2PLUS1D_STD
-
-            src_mean = R2PLUS1D_MEAN
-            src_std = R2PLUS1D_STD
-
-        self.register_buffer("src_mean", torch.tensor(src_mean).view(1, 3, 1, 1, 1))
-        self.register_buffer("src_std", torch.tensor(src_std).view(1, 3, 1, 1, 1))
-        self.register_buffer("dst_mean", torch.tensor(dst_mean).view(1, 3, 1, 1, 1))
-        self.register_buffer("dst_std", torch.tensor(dst_std).view(1, 3, 1, 1, 1))
+        self.register_buffer(
+            "dst_mean",
+            torch.tensor(dst_mean, dtype=torch.float32).view(1, 3, 1, 1, 1),
+        )
+        self.register_buffer(
+            "dst_std",
+            torch.tensor(dst_std, dtype=torch.float32).view(1, 3, 1, 1, 1),
+        )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Adapt competition input and forward through the wrapped model.
@@ -229,16 +225,28 @@ class CompetitionAdapter(torch.nn.Module):
             x = x * self.src_std + self.src_mean
 
         if self._needs_resize:
+            target_resize = self.target_resize
+            assert target_resize is not None
             b, c, t, h, w = x.shape
             x = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
             x = torch.nn.functional.interpolate(
                 x,
-                size=(self._target_spatial, self._target_spatial),
+                size=(target_resize["height"], target_resize["width"]),
                 mode="bilinear",
                 align_corners=False,
             )
-            x = x.reshape(b, t, c, self._target_spatial, self._target_spatial)
+            x = x.reshape(b, t, c, target_resize["height"], target_resize["width"])
             x = x.permute(0, 2, 1, 3, 4)
+
+        if self._needs_crop:
+            target_crop = self.target_crop
+            assert target_crop is not None
+            crop_h = int(target_crop["height"])
+            crop_w = int(target_crop["width"])
+            _, _, _, h, w = x.shape
+            top = (h - crop_h) // 2
+            left = (w - crop_w) // 2
+            x = x[:, :, :, top : top + crop_h, left : left + crop_w]
 
         if self._needs_renorm:
             x = (x - self.dst_mean) / self.dst_std
@@ -249,125 +257,163 @@ class CompetitionAdapter(torch.nn.Module):
         return self.output_extractor(self.model(**{self.input_key: x}))
 
     @classmethod
-    def from_saved_config(
+    def from_export_config(
         cls,
         model: torch.nn.Module,
-        model_path: str | Path,
-        input_layout: str = "BCTHW",
-        input_key: str = "pixel_values",
+        export_config: dict[str, Any],
         output_extractor: Callable[..., torch.Tensor] | None = None,
     ) -> CompetitionAdapter:
-        """Build an adapter from a saved ``val_transform.json``.
-
-        Reads the validation transform config saved alongside the model
-        checkpoint, computes which steps differ from the competition
-        pipeline, and constructs an adapter that applies only those
-        differences in-graph.
-
-        Parameters
-        ----------
-        model
-            The loaded inner model.
-        model_path
-            Directory containing the checkpoint and ``val_transform.json``.
-        input_layout
-            Expected tensor layout of the inner model.
-        input_key
-            Keyword argument name for the model's forward method.
-        output_extractor
-            Extracts logits from the model's raw output.
-
-        Returns
-        -------
-        CompetitionAdapter
-            Configured adapter instance.
-        """
-        from lpcv.transforms import extract_adapter_steps, load_val_transform_config
-
-        model_path = Path(model_path)
-        config_path = model_path / "val_transform.json"
-
-        if config_path.is_file():
-            val_config = load_val_transform_config(config_path)
-            adapter_steps = extract_adapter_steps(val_config)
-        else:
-            logger.warning(
-                f"No val_transform.json found in {model_path}; assuming no adapter needed"
-            )
-            adapter_steps = []
-
+        """Build an adapter from an explicit export config."""
         return cls(
             model=model,
-            adapter_steps=adapter_steps,
-            input_layout=input_layout,
-            input_key=input_key,
+            export_config=export_config,
             output_extractor=output_extractor,
         )
+
+
+def _resolve_export_num_frames(
+    saved_num_frames: int | None,
+    requested_num_frames: int | None,
+    *,
+    force_override: bool,
+) -> int:
+    """Resolve export/compile frame count against saved artifact metadata."""
+    if requested_num_frames is None:
+        if saved_num_frames is None:
+            raise ValueError("Could not infer num_frames from saved metadata. Pass --num-frames.")
+        return saved_num_frames
+    if (
+        saved_num_frames is not None
+        and requested_num_frames != saved_num_frames
+        and not force_override
+    ):
+        raise ValueError(
+            f"Requested num_frames={requested_num_frames} does not match saved "
+            f"artifact num_frames={saved_num_frames}. "
+            "Pass --force-override to ignore the saved metadata."
+        )
+    return requested_num_frames
+
+
+def _load_checkpoint_export_config(
+    model_path: Path,
+    *,
+    model_type: str | None = None,
+    num_frames: int | None = None,
+    force_override: bool = False,
+) -> tuple[str, Any, dict[str, Any], int]:
+    """Load registry metadata and export config from a saved checkpoint directory."""
+    from lpcv.models import (
+        EXPORT_CONFIG_FILENAME,
+        MODEL_CONFIG_FILENAME,
+        VAL_TRANSFORM_FILENAME,
+        get_model_spec,
+        load_model_config,
+        resolve_artifact_model_name,
+        resolve_model_config,
+    )
+    from lpcv.transforms import build_export_config, load_export_config, load_val_transform_config
+
+    resolved_model_type = resolve_artifact_model_name(
+        model_path,
+        model_name=model_type,
+        force_override=force_override,
+    )
+    spec = get_model_spec(resolved_model_type)
+
+    raw_model_cfg: dict[str, Any] = {}
+    if (model_path / MODEL_CONFIG_FILENAME).is_file():
+        raw_model_cfg = load_model_config(model_path)
+    resolved_model = resolve_model_config(resolved_model_type, raw_model_cfg)
+
+    export_path = model_path / EXPORT_CONFIG_FILENAME
+    if export_path.is_file():
+        export_config = load_export_config(export_path)
+    else:
+        val_config_path = model_path / VAL_TRANSFORM_FILENAME
+        if val_config_path.is_file():
+            val_config = load_val_transform_config(val_config_path)
+        else:
+            val_config = resolved_model.val_preset
+        export_config = build_export_config(
+            val_config,
+            input_layout=spec.input_layout,
+            input_key=spec.input_key,
+            num_frames=resolved_model.num_frames,
+        )
+
+    resolved_num_frames = _resolve_export_num_frames(
+        export_config.get("num_frames"),
+        num_frames,
+        force_override=force_override,
+    )
+    export_config["num_frames"] = resolved_num_frames
+    return resolved_model_type, spec, export_config, resolved_num_frames
+
+
+def _load_compile_export_config(
+    model_path: Path,
+    *,
+    num_frames: int | None = None,
+    force_override: bool = False,
+) -> int:
+    """Resolve compile-time frame count from exported ONNX metadata."""
+    from lpcv.models import EXPORT_CONFIG_FILENAME
+    from lpcv.transforms import load_export_config
+
+    export_path = (
+        model_path / EXPORT_CONFIG_FILENAME
+        if model_path.is_dir()
+        else model_path.parent / EXPORT_CONFIG_FILENAME
+    )
+    saved_num_frames: int | None = None
+    if export_path.is_file():
+        saved_num_frames = int(load_export_config(export_path)["num_frames"])
+    return _resolve_export_num_frames(saved_num_frames, num_frames, force_override=force_override)
 
 
 def export_onnx(
     model_path: str | Path,
     output_path: str | Path,
-    model_type: str = "r2plus1d",
-    num_frames: int = DEFAULT_NUM_FRAMES,
+    model_type: str | None = None,
+    num_frames: int | None = None,
     opset_version: int = 18,
     dynamo: bool = False,
     decompose: bool = True,
+    force_override: bool = False,
 ) -> Path:
-    """Wrap a trained checkpoint with the auto-built adapter and export to ONNX.
-
-    The adapter is constructed automatically from the ``val_transform.json``
-    saved alongside the model checkpoint.  Only transforms that differ from
-    the competition's fixed pipeline are baked into the ONNX graph.
-
-    Parameters
-    ----------
-    model_path
-        Path to a saved model checkpoint directory.
-    output_path
-        File path for the exported ``.onnx`` model.
-    model_type
-        Registered model name (e.g. ``"r2plus1d"``, ``"videomae"``).
-    num_frames
-        Temporal dimension of the input tensor.
-    opset_version
-        ONNX opset version.
-    dynamo
-        Use the ``torch.export``-based ONNX exporter instead of TorchScript.
-        Eliminates dynamic control-flow ops (``Loop``, ``If``, ``SequenceEmpty``)
-        that some backends do not support.
-
-    Returns
-    -------
-    Path
-        Path to the ONNX model directory (AI Hub format).
-
-    Raises
-    ------
-    KeyError
-        If *model_type* is not registered.
-    """
-    from lpcv.models import get_model_spec
+    """Wrap a trained checkpoint with the saved adapter contract and export to ONNX."""
+    from lpcv.models import EXPORT_CONFIG_FILENAME
+    from lpcv.transforms import save_export_config
 
     model_path = Path(model_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    spec = get_model_spec(model_type)
+    resolved_model_type, spec, export_config, resolved_num_frames = _load_checkpoint_export_config(
+        model_path,
+        model_type=model_type,
+        num_frames=num_frames,
+        force_override=force_override,
+    )
 
-    logger.info(f"Loading {model_type} model from {model_path}")
+    logger.info(f"Loading {resolved_model_type} model from {model_path}")
     base_model = spec.loader(str(model_path))
 
-    wrapped = CompetitionAdapter.from_saved_config(
+    wrapped = CompetitionAdapter.from_export_config(
         model=base_model,
-        model_path=model_path,
-        input_layout=spec.input_layout,
-        input_key=spec.input_key,
+        export_config=export_config,
         output_extractor=spec.output_extractor,
     )
     wrapped.eval()
 
-    dummy_input = torch.randn(1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+    dummy_input = torch.randn(
+        1,
+        3,
+        resolved_num_frames,
+        COMPETITION_SPATIAL_SIZE,
+        COMPETITION_SPATIAL_SIZE,
+    )
 
     logger.info(f"Exporting ONNX (opset {opset_version}, dynamo={dynamo}) → {output_path}")
 
@@ -408,6 +454,8 @@ def export_onnx(
         all_tensors_to_one_file=True,
         location=data_file,
     )
+
+    save_export_config(export_config, onnx_dir / EXPORT_CONFIG_FILENAME)
 
     logger.info(f"ONNX model directory saved to {onnx_dir}")
     return onnx_dir
@@ -479,11 +527,12 @@ def profile_on_hub(
 def compile_on_hub(
     model_path: str | Path,
     device_name: str = DEFAULT_DEVICE_NAME,
-    num_frames: int = DEFAULT_NUM_FRAMES,
+    num_frames: int | None = None,
     output_dir: str | Path | None = None,
     download: bool = True,
     hub_model_id: str | None = None,
     name: str | None = None,
+    force_override: bool = False,
 ) -> Path | str:
     """Compile an ONNX model on Qualcomm AI Hub and download the binary.
 
@@ -494,7 +543,8 @@ def compile_on_hub(
     device_name
         AI Hub device name (e.g. ``"Dragonwing IQ-9075 EVK"``).
     num_frames
-        Temporal dimension for input spec.
+        Temporal dimension for input spec. When omitted, infer it from the
+        exported ONNX metadata.
     output_dir
         Directory to save the compiled ``.bin``. Defaults to ``./export_assets/``.
     download
@@ -517,7 +567,12 @@ def compile_on_hub(
     model_path = Path(model_path)
 
     device = qai_hub.Device(device_name)
-    input_shape = (1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+    resolved_num_frames = _load_compile_export_config(
+        model_path,
+        num_frames=num_frames,
+        force_override=force_override,
+    )
+    input_shape = (1, 3, resolved_num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
 
     if hub_model_id is not None:
         logger.info(f"Reusing AI Hub model: {hub_model_id}")
@@ -557,13 +612,12 @@ def compile_on_hub(
 def validate_on_hub(
     model_type: str = "r2plus1d",
     num_classes: int = 92,
-    num_frames: int = DEFAULT_NUM_FRAMES,
     device_name: str = DEFAULT_DEVICE_NAME,
     opset_version: int = 18,
     dynamo: bool = False,
     decompose: bool = True,
     name: str | None = None,
-    model_kwargs: dict[str, Any] | None = None,
+    model_config: dict[str, Any] | None = None,
 ) -> str:
     """Instantiate a model, export to ONNX, compile on AI Hub, and submit a profile job.
 
@@ -581,8 +635,6 @@ def validate_on_hub(
         Registered model name (e.g. ``"r2plus1d"``, ``"x3d"``, ``"mvitv2"``).
     num_classes
         Number of output classes for the throwaway model.
-    num_frames
-        Temporal dimension of the input tensor.
     device_name
         Qualcomm AI Hub device name.
     opset_version
@@ -608,8 +660,15 @@ def validate_on_hub(
     """
     import qai_hub
 
-    from lpcv.models import get_model_spec
+    from lpcv.models import (
+        EXPORT_CONFIG_FILENAME,
+        VAL_TRANSFORM_FILENAME,
+        get_model_spec,
+        resolve_model_config,
+    )
+    from lpcv.transforms import build_export_config, save_export_config, save_val_transform_config
 
+    resolved_model = resolve_model_config(model_type, model_config or {"model": model_type})
     spec = get_model_spec(model_type)
     job_prefix = name or f"validate-{model_type}"
 
@@ -617,7 +676,10 @@ def validate_on_hub(
         raise ValueError(f"Model {model_type!r} does not have a throwaway_builder registered")
 
     logger.info(f"Building throwaway {model_type} model ({num_classes} classes)")
-    base_model = spec.throwaway_builder(num_classes, **(model_kwargs or {}))
+    base_model = spec.throwaway_builder(
+        num_classes,
+        **{k: v for k, v in resolved_model.model_config.items() if k != "model"},
+    )
 
     device = qai_hub.Device(device_name)
 
@@ -626,20 +688,29 @@ def validate_on_hub(
 
         base_model.save_pretrained(tmp_path)  # type: ignore[attr-defined]
 
-        from lpcv.transforms import save_val_transform_config
-
-        save_val_transform_config(spec.val_preset, tmp_path / "val_transform.json")
-
-        wrapped = CompetitionAdapter.from_saved_config(
-            model=base_model,
-            model_path=tmp_path,
+        save_val_transform_config(resolved_model.val_preset, tmp_path / VAL_TRANSFORM_FILENAME)
+        export_config = build_export_config(
+            resolved_model.val_preset,
             input_layout=spec.input_layout,
             input_key=spec.input_key,
+            num_frames=resolved_model.num_frames,
+        )
+        save_export_config(export_config, tmp_path / EXPORT_CONFIG_FILENAME)
+
+        wrapped = CompetitionAdapter.from_export_config(
+            model=base_model,
+            export_config=export_config,
             output_extractor=spec.output_extractor,
         )
         wrapped.eval()
 
-        dummy = torch.randn(1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+        dummy = torch.randn(
+            1,
+            3,
+            resolved_model.num_frames,
+            COMPETITION_SPATIAL_SIZE,
+            COMPETITION_SPATIAL_SIZE,
+        )
         onnx_dir = tmp_path / f"{model_type}.onnx"
         onnx_dir.mkdir()
         inner_onnx = onnx_dir / f"{model_type}.onnx"
@@ -678,7 +749,15 @@ def validate_on_hub(
             location=data_file,
         )
 
-        input_shape = (1, 3, num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+        save_export_config(export_config, onnx_dir / EXPORT_CONFIG_FILENAME)
+
+        input_shape = (
+            1,
+            3,
+            resolved_model.num_frames,
+            COMPETITION_SPATIAL_SIZE,
+            COMPETITION_SPATIAL_SIZE,
+        )
 
         logger.info(f"Submitting compile job on {device_name}")
         compile_job = qai_hub.submit_compile_job(

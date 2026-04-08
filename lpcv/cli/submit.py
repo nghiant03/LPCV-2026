@@ -41,7 +41,7 @@ def preprocess(
         decoder_name=decoder,
         target_fps=target_fps,
     )
-    logger.info(f"Done — manifest: {manifest}")
+    logger.info(f"Done — Manifest: {manifest}")
 
 
 @app.command()
@@ -51,11 +51,13 @@ def export(
         "model.onnx"
     ),
     model_type: Annotated[
-        str, typer.Option("--model-type", "-m", help="Registered model type (e.g. videomae).")
-    ] = "videomae",
+        str | None,
+        typer.Option("--model-type", "-m", help="Override model type from the saved artifact."),
+    ] = None,
     num_frames: Annotated[
-        int, typer.Option("--num-frames", help="Temporal dimension of input.")
-    ] = 16,
+        int | None,
+        typer.Option("--num-frames", help="Override input frames from the saved artifact."),
+    ] = None,
     opset: Annotated[int, typer.Option("--opset", help="ONNX opset version.")] = 18,
     dynamo: Annotated[
         bool,
@@ -70,6 +72,13 @@ def export(
             help="Replace depthwise 3D convs with 2D+1D decompositions.",
         ),
     ] = True,
+    force_override: Annotated[
+        bool,
+        typer.Option(
+            "--force-override",
+            help="Allow --model-type/--num-frames to differ from saved artifact metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Export a trained model checkpoint to ONNX with competition adapter."""
     from lpcv.submission import export_onnx
@@ -82,6 +91,7 @@ def export(
         opset_version=opset,
         dynamo=dynamo,
         decompose=decompose,
+        force_override=force_override,
     )
 
 
@@ -92,8 +102,9 @@ def compile(
         str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
     ] = "Dragonwing IQ-9075 EVK",
     num_frames: Annotated[
-        int, typer.Option("--num-frames", help="Temporal dimension for input spec.")
-    ] = 16,
+        int | None,
+        typer.Option("--num-frames", help="Override frames from the exported ONNX metadata."),
+    ] = None,
     output_dir: Annotated[
         Path, typer.Option("--output-dir", "-o", help="Directory for the compiled .bin.")
     ] = Path("export_assets"),
@@ -112,6 +123,13 @@ def compile(
         str | None,
         typer.Option("--name", "-n", help="Job name on AI Hub."),
     ] = None,
+    force_override: Annotated[
+        bool,
+        typer.Option(
+            "--force-override",
+            help="Allow --num-frames to differ from exported ONNX metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Compile an ONNX model on Qualcomm AI Hub and download the binary."""
     from lpcv.submission import compile_on_hub
@@ -124,6 +142,7 @@ def compile(
         download=not no_download,
         hub_model_id=hub_model_id,
         name=name,
+        force_override=force_override,
     )
     if no_download:
         logger.info(f"AI Hub model ID: {result}")
@@ -200,18 +219,16 @@ def validate(
 
     model_cfg = load_model_config(config)
     model_type = model_cfg["model"]
-    arch_params = {k: v for k, v in model_cfg.items() if k != "model"}
 
     url = validate_on_hub(
         model_type=model_type,
         num_classes=num_classes,
-        num_frames=arch_params.get("num_frames", 16),
         device_name=device_name,
         opset_version=opset,
         dynamo=dynamo,
         decompose=decompose,
         name=name,
-        model_kwargs=arch_params,
+        model_config=model_cfg,
     )
     logger.info(f"Validation complete: {url}")
 

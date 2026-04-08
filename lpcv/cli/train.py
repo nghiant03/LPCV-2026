@@ -13,7 +13,7 @@ from loguru import logger
 
 
 def _launch(
-    model_name: str,
+    spec: Any,
     cfg: Any,
     train: Any,
     val: Any,
@@ -25,9 +25,6 @@ def _launch(
     Must be defined at module level so it can be pickled by
     ``torch.distributed``'s spawn-based multiprocessing.
     """
-    from lpcv.models import get_model_spec
-
-    spec = get_model_spec(model_name)
     trainer = spec.trainer_cls(
         config=cfg,
         train_dataset=train,
@@ -35,20 +32,19 @@ def _launch(
         val_transform_config=val_cfg,
         model_config=model_cfg,
     )
+    trainer.input_layout = spec.input_layout
+    trainer.input_key = spec.input_key
     trainer.train()
 
 
 def _run_training(
-    model_name: str,
     data_dir: Path,
+    spec: Any,
+    resolved_model: Any,
     config_overrides: dict[str, Any],
     decoder: str,
-    num_frames: int,
     num_gpus: int,
-    train_preset_override: list[dict[str, Any]] | None = None,
-    val_preset_override: list[dict[str, Any]] | None = None,
     data_percent: float = 100.0,
-    model_config: dict[str, Any] | None = None,
 ) -> None:
     """Shared training flow for any registered model.
 
@@ -59,13 +55,7 @@ def _run_training(
     """
     from lpcv.datasets.base import load_video_dataset
     from lpcv.datasets.decoder import get_decoder
-    from lpcv.models import get_model_spec
     from lpcv.transforms import build_transform
-
-    spec = get_model_spec(model_name)
-
-    train_preset = train_preset_override or spec.train_preset
-    val_preset = val_preset_override or spec.val_preset
 
     pin_memory = True
     decoder_kwargs: dict[str, str | int | None] = {}
@@ -76,14 +66,14 @@ def _run_training(
             logger.info(f"NVDEC multi-GPU enabled: distributing decoding across {num_gpus} GPUs")
 
     video_decoder = get_decoder(decoder, **decoder_kwargs)
-    train_transform = build_transform(train_preset)
-    val_transform = build_transform(val_preset)
+    train_transform = build_transform(resolved_model.train_preset)
+    val_transform = build_transform(resolved_model.val_preset)
     train_ds, eval_ds = load_video_dataset(
         data_dir=data_dir,
         decoder=video_decoder,
         train_transform=train_transform,
         val_transform=val_transform,
-        num_frames=num_frames,
+        num_frames=resolved_model.num_frames,
         data_percent=data_percent,
     )
 
@@ -101,10 +91,22 @@ def _run_training(
             rdzv_endpoint="localhost:0",
         )
         elastic_launch(launch_config, _launch)(
-            model_name, config, train_ds, eval_ds, val_preset, model_config
+            spec,
+            config,
+            train_ds,
+            eval_ds,
+            resolved_model.val_preset,
+            resolved_model.model_config,
         )
     else:
-        _launch(model_name, config, train_ds, eval_ds, val_preset, model_config)
+        _launch(
+            spec,
+            config,
+            train_ds,
+            eval_ds,
+            resolved_model.val_preset,
+            resolved_model.model_config,
+        )
 
 
 def train(
@@ -215,7 +217,7 @@ def train(
     Provide ``--model`` to select the architecture directly, ``--config``
     to load from a YAML file, or both (``--model`` wins).
     """
-    from lpcv.models import list_models, load_model_config
+    from lpcv.models import get_model_spec, list_models, load_model_config, resolve_model_config
 
     if decoder == "torchcodec-nvdec" and num_workers != num_gpus:
         logger.warning(
@@ -224,12 +226,10 @@ def train(
         )
         num_workers = num_gpus
 
-    arch_params: dict[str, Any] = {}
     model_cfg: dict[str, Any] | None = None
 
     if config is not None:
         model_cfg = load_model_config(config)
-        arch_params = {k: v for k, v in model_cfg.items() if k != "model"}
 
     model_name = model or (model_cfg["model"] if model_cfg else "")
 
@@ -246,8 +246,11 @@ def train(
     if model_cfg is None:
         model_cfg = {"model": model_name}
 
+    resolved_model = resolve_model_config(model_name, model_cfg)
+    spec = get_model_spec(model_name)
+
     config_overrides: dict[str, Any] = {
-        **arch_params,
+        **{k: v for k, v in resolved_model.model_config.items() if k != "model"},
         "output_dir": output_dir,
         "num_train_epochs": epochs,
         "per_device_train_batch_size": batch_size,
@@ -270,57 +273,12 @@ def train(
     if lr_scheduler_type:
         config_overrides["lr_scheduler_type"] = lr_scheduler_type
 
-    num_frames = arch_params.get("num_frames", 16)
-    train_preset_override: list[dict[str, Any]] | None = None
-    val_preset_override: list[dict[str, Any]] | None = None
-
-    if model_name == "x3d":
-        from lpcv.datasets.info import X3D_MEAN, X3D_STD
-        from lpcv.models.x3d import X3D_PRESET_DEFAULTS
-        from lpcv.transforms import make_presets
-
-        preset = arch_params.get("preset", "x3d_m")
-        if preset not in X3D_PRESET_DEFAULTS:
-            available = ", ".join(sorted(X3D_PRESET_DEFAULTS))
-            raise typer.BadParameter(f"Unknown preset {preset!r}. Available: {available}")
-
-        defaults = X3D_PRESET_DEFAULTS[preset]
-        resolved_frames = num_frames if num_frames > 0 else defaults["num_frames"]
-        resolved_crop = arch_params.get("crop_size", 0)
-        resolved_crop = resolved_crop if resolved_crop > 0 else defaults["crop_size"]
-
-        config_overrides["num_frames"] = resolved_frames
-        config_overrides["crop_size"] = resolved_crop
-        num_frames = resolved_frames
-
-        train_preset_override, val_preset_override = make_presets(
-            mean=X3D_MEAN, std=X3D_STD, crop_size=resolved_crop
-        )
-    elif model_name in ("mvitv2", "stam"):
-        from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
-        from lpcv.transforms import make_presets
-
-        crop_size = arch_params.get("crop_size", 112)
-        train_preset_override, val_preset_override = make_presets(
-            mean=IMAGENET_MEAN, std=IMAGENET_STD, crop_size=crop_size
-        )
-    elif model_name == "tsm":
-        from lpcv.models.tsm import TSM_BACKBONES
-
-        backbone = arch_params.get("backbone", "resnet50")
-        if backbone not in TSM_BACKBONES:
-            available = ", ".join(sorted(TSM_BACKBONES))
-            raise typer.BadParameter(f"Unknown backbone {backbone!r}. Available: {available}")
-
     _run_training(
-        model_name=model_name,
         data_dir=data_dir,
+        spec=spec,
+        resolved_model=resolved_model,
         config_overrides=config_overrides,
         decoder=decoder,
-        num_frames=num_frames,
         num_gpus=num_gpus,
-        train_preset_override=train_preset_override,
-        val_preset_override=val_preset_override,
         data_percent=data_percent,
-        model_config=model_cfg,
     )

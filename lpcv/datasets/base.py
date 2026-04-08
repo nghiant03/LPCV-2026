@@ -24,41 +24,6 @@ if TYPE_CHECKING:
     from lpcv.datasets.decoder import VideoDecoder
 
 
-class LabelFeature:
-    """Mimics the HuggingFace ``dataset.features["label"]`` interface.
-
-    Exposes a ``names`` attribute so that ``VideoMAEModelTrainer`` can read
-    label metadata without changes.
-
-    Parameters
-    ----------
-    label_names
-        Ordered list of class label strings.
-    """
-
-    def __init__(self, label_names: list[str]) -> None:
-        self.names = label_names
-
-
-class DatasetFeatures:
-    """Thin wrapper exposing a ``get("label")`` API compatible with ``VideoMAEModelTrainer``.
-
-    Parameters
-    ----------
-    label_names
-        Ordered list of class label strings.
-    """
-
-    def __init__(self, label_names: list[str]) -> None:
-        self._label = LabelFeature(label_names)
-
-    def get(self, key: str) -> LabelFeature | None:
-        """Return the feature for *key*, or ``None`` if not found."""
-        if key == "label":
-            return self._label
-        return None
-
-
 class VideoDataset(Dataset):
     """Unified video dataset that delegates frame decoding to an injected decoder.
 
@@ -81,6 +46,9 @@ class VideoDataset(Dataset):
         tensor **after** decoding.
     num_frames
         Number of frames to sample per video.
+    label_names
+        Ordered list of class label strings, exposed directly for trainer
+        metadata and artifact generation.
     """
 
     def __init__(
@@ -97,10 +65,10 @@ class VideoDataset(Dataset):
 
         self.video_paths = video_paths
         self.labels = labels
+        self.label_names = label_names
         self.decoder = decoder
         self.transform = transform
         self.num_frames = num_frames
-        self.features = DatasetFeatures(label_names)
 
     def __len__(self) -> int:
         return len(self.video_paths)

@@ -17,9 +17,13 @@ def model(
         typer.Argument(help="Path to the trained model directory."),
     ],
     num_frames: Annotated[
-        int,
-        typer.Option("--num-frames", help="Number of frames to sample per video."),
-    ] = 16,
+        int | None,
+        typer.Option("--num-frames", help="Override frames per clip from the saved artifact."),
+    ] = None,
+    model_type: Annotated[
+        str | None,
+        typer.Option("--model-type", "-m", help="Override model type from the saved artifact."),
+    ] = None,
     batch_size: Annotated[
         int,
         typer.Option("--batch-size", "-b", help="Batch size for inference."),
@@ -38,24 +42,65 @@ def model(
             help="Video decoder backend: 'pyav', 'torchcodec-cpu', or 'torchcodec-nvdec'.",
         ),
     ] = "torchcodec-nvdec",
+    force_override: Annotated[
+        bool,
+        typer.Option(
+            "--force-override",
+            help="Allow --model-type/--num-frames to differ from saved artifact metadata.",
+        ),
+    ] = False,
 ) -> None:
-    """Evaluate a trained VideoMAE model on the QEVD validation set."""
+    """Evaluate a trained model on the QEVD validation set."""
     from lpcv.datasets.base import load_video_dataset
     from lpcv.datasets.decoder import get_decoder
     from lpcv.evaluation import evaluate_model
-    from lpcv.transforms import VAL_PRESET, build_transform
+    from lpcv.models import (
+        MODEL_CONFIG_FILENAME,
+        VAL_TRANSFORM_FILENAME,
+        load_model_config,
+        resolve_artifact_model_name,
+        resolve_model_config,
+    )
+    from lpcv.transforms import build_transform, load_val_transform_config
 
+    model_dir = Path(model_path)
+    resolved_model_type = resolve_artifact_model_name(
+        model_dir,
+        model_name=model_type,
+        force_override=force_override,
+    )
+    raw_model_config: dict[str, object] = {}
+    if (model_dir / MODEL_CONFIG_FILENAME).is_file():
+        raw_model_config = load_model_config(model_dir)
+    resolved_model = resolve_model_config(resolved_model_type, raw_model_config)
+    resolved_num_frames = resolved_model.num_frames
+    if num_frames is not None:
+        if num_frames != resolved_num_frames and not force_override:
+            raise typer.BadParameter(
+                f"--num-frames={num_frames} does not match saved artifact "
+                f"num_frames={resolved_num_frames}. "
+                "Pass --force-override to ignore the saved metadata."
+            )
+        resolved_num_frames = num_frames
+
+    val_config_path = model_dir / VAL_TRANSFORM_FILENAME
+    val_config = (
+        load_val_transform_config(val_config_path)
+        if val_config_path.is_file()
+        else resolved_model.val_preset
+    )
     video_decoder = get_decoder(decoder)
-    val_transform = build_transform(VAL_PRESET)
+    val_transform = build_transform(val_config)
     _, eval_ds = load_video_dataset(
         data_dir=data_dir,
         decoder=video_decoder,
         val_transform=val_transform,
-        num_frames=num_frames,
+        num_frames=resolved_num_frames,
     )
 
     results = evaluate_model(
-        model_path=Path(model_path),
+        model_type=resolved_model_type,
+        model_path=model_dir,
         eval_ds=eval_ds,
         batch_size=batch_size,
         clips_per_video=clips_per_video,

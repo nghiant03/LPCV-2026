@@ -195,13 +195,13 @@ Submission commands require working Qualcomm AI Hub credentials in your environm
 
 ```bash
 # 1. Convert raw QEVD into videofolder format
-uv run lpcv convert ./data/qevd_raw
+uv run lpcv convert ./data/QEVD
 
 # 2. Train a model
-uv run lpcv train ./data/qevd_raw --config configs/x3d.yaml --output-dir model/x3d
+uv run lpcv train ./data/QEVD --config configs/x3d.yaml --output-dir model/x3d
 
 # 3. Evaluate the trained checkpoint locally
-uv run lpcv evaluate model ./data/qevd_raw ./model/x3d
+uv run lpcv evaluate model ./data/sQEVD ./model/x3d
 
 # 4. Export, compile, and profile for the target device
 uv run lpcv submit export ./model/x3d -o ./export/model.onnx

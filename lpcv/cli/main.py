@@ -2,15 +2,15 @@
 
 import typer
 
-from lpcv.cli.data import app as data_app
+from lpcv.cli.data import convert as convert_command
 from lpcv.cli.evaluate import app as evaluate_app
 from lpcv.cli.submit import app as submit_app
 from lpcv.cli.train import train as train_command
 
 app = typer.Typer()
 app.command(name="train")(train_command)
+app.command(name="convert")(convert_command)
 
-app.add_typer(data_app, name="data")
 app.add_typer(evaluate_app, name="evaluate")
 app.add_typer(submit_app, name="submit")
 

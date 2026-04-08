@@ -27,7 +27,7 @@ def model(
     batch_size: Annotated[
         int,
         typer.Option("--batch-size", "-b", help="Batch size for inference."),
-    ] = 8,
+    ] = 32,
     clips_per_video: Annotated[
         int,
         typer.Option(

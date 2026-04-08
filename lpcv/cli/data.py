@@ -5,10 +5,7 @@ from typing import Annotated
 
 import typer
 
-app = typer.Typer(help="Dataset operations.")
 
-
-@app.command()
 def convert(
     data_dir: Annotated[Path, typer.Argument(help="Root directory of the QEVD dataset.")],
     target_label: Annotated[

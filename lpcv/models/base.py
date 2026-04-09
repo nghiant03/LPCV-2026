@@ -462,7 +462,7 @@ class BaseModelTrainer:
         (e.g. ``gradient_checkpointing``, ``ddp_find_unused_parameters``).
         """
         return {
-            "ddp_find_unused_parameters": True,
+            "ddp_find_unused_parameters": False,
         }
 
     def _save_model(self, trainer: Trainer, path: Path) -> None:

@@ -30,9 +30,6 @@ from lpcv.models.base import (
     log_freeze_stats,
 )
 
-STAM_NUM_FRAMES: int = 16
-STAM_CROP_SIZE: int = 112
-
 VIT_PRETRAINED_VARIANTS: dict[int, str] = {
     384: "vit_small_patch16_224",
     768: "vit_base_patch16_224",

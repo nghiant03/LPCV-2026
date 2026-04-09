@@ -87,6 +87,7 @@ Use `qai_hub.get_job()` to inspect any job by ID. Profile times are in **microse
 lpcv/
 ├── __init__.py
 ├── evaluation.py          # Top-k accuracy, H5 logit evaluation, full model evaluation
+├── submission.py          # Competition adapter, ONNX export, Qualcomm AI Hub compile/infer/profile
 ├── transforms.py          # Video transform registry (temporal, spatial, normalization)
 ├── cli/
 │   ├── __init__.py
@@ -94,10 +95,10 @@ lpcv/
 │   ├── data.py            # CLI: convert raw QEVD to videofolder
 │   ├── evaluate.py        # CLI: evaluate model or H5 logits
 │   ├── train.py           # CLI: single `train` command, reads model config from YAML
-│   └── submit.py          # CLI: preprocess, export, compile, infer, validate on Qualcomm AI Hub
+│   └── submit.py          # CLI: preprocess, export, compile, profile, infer, validate on Qualcomm AI Hub
 ├── datasets/
 │   ├── __init__.py
-│   ├── info.py            # Constants: video extensions, split dirs, label file name, norm stats
+│   ├── info.py            # Constants: video extensions, split dirs, label file name
 │   ├── base.py            # VideoDataset (PyTorch Dataset) + load_video_dataset()
 │   ├── decoder.py         # VideoDecoder protocol + PyAV/TorchCodec implementations
 │   ├── qevd.py            # QEVDAdapter: convert raw QEVD to videofolder layout
@@ -108,15 +109,16 @@ lpcv/
     ├── videomae.py        # VideoMAETrainerConfig + VideoMAEModelTrainer (HF Trainer wrapper)
     ├── r2plus1d.py        # R2Plus1DTrainerConfig + R2Plus1DModelTrainer + R2Plus1DForClassification
     ├── x3d.py             # X3DTrainerConfig + X3DModelTrainer + X3DForClassification (torch hub)
-    ├── tpn.py             # TPNTrainerConfig + TPNModelTrainer + TPNForClassification (mmaction2)
-    └── mvitv2.py          # MViTv2TrainerConfig + MViTv2ModelTrainer + MViTv2ForClassification (torchvision)
+    ├── tsm.py             # TSMTrainerConfig + TSMModelTrainer + TSMForClassification (temporal shift)
+    ├── mvitv2.py          # MViTv2TrainerConfig + MViTv2ModelTrainer + MViTv2ForClassification (torchvision)
+    └── stam.py            # STAMTrainerConfig + STAMModelTrainer + STAMForClassification (space-time attention)
 ```
 
 ## Architecture & Patterns
 
 ### CLI Layer (`lpcv/cli/`)
 
-- Uses **Typer** with sub-app pattern: `main.py` mounts `data`, `train`, `evaluate`, `submit` sub-commands.
+- Uses **Typer** with sub-app pattern: `main.py` mounts `train` and `convert` as direct commands, `evaluate` and `submit` as sub-groups (nested Typer apps).
 - Heavy imports (torch, transformers, datasets) are deferred inside command functions to keep CLI startup fast.
 - All CLI parameters use `Annotated[T, typer.Option/Argument]` style.
 - The `train` CLI exposes `--gradient-checkpointing/--no-gradient-checkpointing` for every trainer via the shared `BaseTrainerConfig`.
@@ -139,10 +141,11 @@ Two-stage pipeline:
 - `DECODERS` registry dict maps string names (`"pyav"`, `"torchcodec-cpu"`, `"torchcodec-nvdec"`) to classes.
 - `get_decoder(name, **kwargs)` factory function instantiates by name.
 - All decoders use `uniform_temporal_indices()` from `utils.py` for frame subsampling.
-- Note: `torchcodec` is an optional dependency not listed in `pyproject.toml`.
+- `torchcodec` is a required dependency (pinned `<0.11` in `pyproject.toml`).
 
 ### Transform System (`lpcv/transforms.py`)
 
+- Normalisation statistics live here as module-level constants (`R2PLUS1D_MEAN/STD`, `IMAGENET_MEAN/STD`, `X3D_MEAN/STD`), co-located with the transforms that consume them.
 - Registry pattern: `@register("Name")` adds callable classes to `_REGISTRY`.
 - `build_transform(steps)` constructs a `torchvision.transforms.Compose` from a list of `{"name": ..., **kwargs}` dicts.
 - `get(name)` retrieves a registered transform class by name.
@@ -152,7 +155,7 @@ Two-stage pipeline:
   - `COMPETITION_PRESET` — ScalePixels → Resize(128,171) → Normalize(R2+1D) → CenterCrop(112). Single source of truth for the competition's fixed pipeline; used by `preprocess_dataset()` and export-contract generation.
   - `TRAIN_PRESET` — ScalePixels → Resize(128,171) → RandomHorizontalFlip → Normalize(R2+1D) → RandomCrop(112).
   - `VAL_PRESET` — alias for `COMPETITION_PRESET`.
-- `make_x3d_presets(crop_size)` — dynamically builds X3D train/val presets (X3D norm, short-side scale, crop) for a given spatial size.
+- `make_presets(mean, std, resize_height, resize_width, crop_size)` — generic preset builder with customizable normalization and spatial sizes; module-level `TRAIN_PRESET` and `VAL_PRESET` are produced by calling `make_presets()` with R2+1D defaults.
 - `save_val_transform_config()` / `load_val_transform_config()` — persist val transform config as JSON alongside model checkpoints.
 - `build_export_config()` / `save_export_config()` / `load_export_config()` — convert a supported val config into an explicit ONNX adapter contract (`export_config.json`) and persist it alongside checkpoints/exports.
 - Registered transforms: `FromVideo`, `UniformTemporalSubsample`, `ScalePixels`, `Normalize`, `RandomShortSideScale`, `ShortSideScale`, `RandomCrop`, `CenterCrop`, `RandomHorizontalFlip`, `Resize`.
@@ -165,7 +168,8 @@ Two-stage pipeline:
 - `load_model_config(path)` / `save_model_config(config, output_dir)` — YAML load/save for model architecture config (`model_config.yaml`); passing a saved model directory loads `model_config.yaml` from the artifact root.
 - Saved-artifact metadata filenames are centralized here: `model_config.yaml`, `val_transform.json`, and `export_config.json`.
 - `model_config_from_trainer(model_name, config)` — extracts model-specific fields from a trainer config dataclass.
-- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tpn"`, `"mvitv2"`, `"tsm"`, `"stam"`.
+- Built-in registrations: `"videomae"`, `"r2plus1d"`, `"x3d"`, `"tsm"`, `"mvitv2"`, `"stam"`.
+- `resolve_artifact_model_name(model_path, model_name)` — infers model name from a saved artifact directory, with optional override.
 - CLI `train.py` uses the registry via `_run_training()` — a single generic flow that resolves the model config through the registry, builds datasets with the resolved presets, and delegates to the spec's trainer class.
 
 ### Model Training (`lpcv/models/videomae.py`)
@@ -181,6 +185,7 @@ Two-stage pipeline:
 - `compute_metrics()`: shared top-1/top-5 accuracy computation.
 - `collate_for_video()`: shared collation with optional `(T,C,H,W)` → `(C,T,H,W)` permutation.
 - `log_freeze_stats()`: shared parameter-count logging after freezing.
+- `decompose_depthwise_conv3d()`: replaces all depthwise `Conv3d` modules with `DecomposedDepthwiseConv3d` (spatial 2D + temporal 1D decomposition for Qualcomm AI Hub compatibility).
 - `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, HuggingFace-compatible `gradient_checkpointing_enable()` / `gradient_checkpointing_disable()`, `save_pretrained()`, and `_extra_save_meta()` hook. Checkpointing is applied generically around the wrapped backbone during training.
 - `BaseModelTrainer`: shared HF Trainer wrapper — reads `train_dataset.label_names`, handles TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), export-contract saving (`export_config.json`), `ddp_find_unused_parameters=True`, and custom DataLoader multiprocessing context overrides when required by a decoder/runtime. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
 
@@ -197,13 +202,19 @@ Two-stage pipeline:
 - `X3DForClassification(BaseForClassification)`: loads X3D from `facebookresearch/pytorchvideo` via `torch.hub`, replaces the head projection with a custom linear layer, swaps fixed `AvgPool3d` with `AdaptiveAvgPool3d((1,1,1))` for resolution-agnostic pooling.
 - `X3DModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` for X3D-specific freezing (`blocks.4` + `blocks.5`).
 
-### Model Training (`lpcv/models/tpn.py`)
+### Model Training (`lpcv/models/tsm.py`)
 
-- `TPN_BACKBONES`: maps backbone names (`"tsm"`/`"slowonly"`) to mmaction2 config dicts including recognizer type, backbone config, format shape, default `num_frames` and `crop_size`.
-- `_build_tpn_model()`: builds any TPN variant via mmaction2's `MODELS.build()` registry — configures backbone, TPN neck, TPNHead, and ActionDataPreprocessor.
-- `TPNTrainerConfig(BaseTrainerConfig)`: adds `backbone`, `num_classes`, `num_frames`, `crop_size`, `label_smoothing`; `resolved_num_frames()`/`resolved_crop_size()` fall back to backbone defaults when 0.
-- `TPNForClassification(BaseForClassification)`: backbone-agnostic wrapper; handles both 2D recognizers (TSM: BCTHW → B*T,C,H,W reshape) and 3D recognizers (SlowOnly: BCTHW passthrough) via `_is_2d` flag. Forwards through mmaction2's `_run_forward(..., mode="tensor")`.
-- `TPNModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` — freezes mmaction2's inner `.backbone` sub-module (`"backbone"` = full backbone, `"partial"` = layers 1–3 frozen, layer4 trainable).
+- **Temporal Shift Module (TSM)** — efficient video understanding using only 2D convolutions, no Conv3d.
+- `TSMTrainerConfig(BaseTrainerConfig)`: adds `backbone` (`resnet18`/`resnet50`), `num_classes`, `num_frames` (default 8), `shift_div`, `shift_last_n`, `label_smoothing`; overrides defaults (10 epochs, cosine LR, 1e-2 LR, partial freeze).
+- `TSMForClassification(BaseForClassification)`: wraps torchvision ResNet with `TemporalShiftWrapper` that injects `torch.roll`-based channel shifting into selected residual blocks. Input `(B,C,T,H,W)` → permute+reshape to `(B*T,C,H,W)` → 2D ResNet → temporal mean pooling.
+- `TSMModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` — `"partial"` freezes all except `layer4` + `fc`.
+
+### Model Training (`lpcv/models/stam.py`)
+
+- **STAM = Space-Time Attention Model** — two-stage ViT: per-frame spatial ViT (ImageNet-21k pretrained via `timm`) → temporal TransformerEncoder → linear head. No 3D convolutions.
+- `STAMTrainerConfig(BaseTrainerConfig)`: adds `num_classes`, `num_frames` (default 16), `crop_size` (default 112), `patch_size`, `embed_dim`, `spatial_depth`, `num_heads`, `temporal_layers`, `label_smoothing`; defaults to 1e-4 LR and `"partial"` freeze.
+- `STAMForClassification(BaseForClassification)`: `SpatialViT` (ViT-B/16 with learnable CLS + positional embeddings, 12 transformer blocks) produces per-frame CLS tokens → `_TemporalAggregate` (temporal CLS + positional embeddings, 6-layer TransformerEncoder) → video-level embedding.
+- `STAMModelTrainer(BaseModelTrainer)`: overrides `_init_model()` and `_apply_freeze_strategy()` — `"partial"` freezes patch embed + blocks 0–7, trains blocks 8–11 + norm + temporal + head.
 
 ### Model Training (`lpcv/models/mvitv2.py`)
 
@@ -220,18 +231,21 @@ Two-stage pipeline:
 - `CompetitionAdapter`: `nn.Module` that adapts competition input (BCTHW, 112×112, R2+1D norm) to any model's expected format. Handles only the supported deterministic export contract: optional re-normalization, resize, center crop, and layout permutation. It is built from `export_config.json`, not by diffing transform step lists.
 - `export_onnx()`: loads model via `ModelSpec.loader`, infers model type / `num_frames` from the saved artifact by default, wraps with `CompetitionAdapter`, exports ONNX with external data, and writes `export_config.json` into the ONNX output directory.
 - `compile_on_hub()`: uploads ONNX to Qualcomm AI Hub, infers `num_frames` from the exported ONNX metadata by default, submits compile job targeting `qnn_context_binary`, downloads `.bin`.
+- `profile_on_hub()`: submits a profile job for a compiled `.bin` or existing AI Hub model; returns job URL.
+- `validate_on_hub()`: end-to-end smoke test — builds throwaway model via registry → export ONNX → compile → profile on AI Hub.
 - `run_inference_on_hub()`: loads tensors from manifest, uploads in chunks of 538 (≤2GB flatbuffer limit), submits inference jobs, collects logits into HDF5.
-- Key constants: `DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"`, `CHUNK_SIZE = 538`, `FRAME_RATE = 4`, `COMPETITION_SPATIAL_SIZE = 112`.
+- Key constants: `DEFAULT_NUM_FRAMES = 16`, `DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"`, `CHUNK_SIZE = 538`, `FRAME_RATE = 4`, `COMPETITION_SPATIAL_SIZE = 112`.
 
 ### Submission CLI (`lpcv/cli/submit.py`)
 
-Five subcommands under `uv run lpcv submit`:
+Six subcommands under `uv run lpcv submit`:
 
 | Command | Usage | Description |
 |---|---|---|
 | `preprocess` | `<data_dir> <output_dir>` | Decode videos → `.npy` tensors + `manifest.jsonl` |
 | `export` | `<model_path> -o model.onnx` | Export checkpoint to ONNX with competition adapter; model type and `num_frames` default to saved artifact metadata |
 | `compile` | `<onnx_path> -o export_assets/` | Compile ONNX on Qualcomm AI Hub → `.bin`; `num_frames` defaults to exported ONNX metadata |
+| `profile` | `<compiled.bin>` | Submit a profile job for a compiled model on AI Hub |
 | `infer` | `<tensor_dir> -c <compiled.bin>` | Upload tensors, run on-device inference on AI Hub |
 | `validate` | `<config.yaml>` | Resolve model config through the registry, build a throwaway model, export, compile, and profile on AI Hub |
 
@@ -281,7 +295,8 @@ uv run lpcv evaluate h5 ./inference_results.h5 ./tensors/manifest.jsonl ./class_
 | transformers  | VideoMAE model, Trainer, processors  |
 | datasets      | HuggingFace dataset loading/caching  |
 | av (PyAV)     | Video decoding, probing, remuxing    |
-| torchvision   | Compose, image transforms            |
+| torchvision   | Compose, video models, transforms    |
+| torchcodec    | Video decoding (CPU / NVDEC GPU)     |
 | typer         | CLI framework                        |
 | loguru        | Structured logging                   |
 | pydantic      | Data validation                      |
@@ -290,9 +305,8 @@ uv run lpcv evaluate h5 ./inference_results.h5 ./tensors/manifest.jsonl ./class_
 | tqdm          | Progress bars                        |
 | pillow        | Image processing support             |
 | evaluate      | HuggingFace evaluation metrics       |
-
-### Optional
-
-| Package     | Purpose                                      |
-|-------------|----------------------------------------------|
-| torchcodec  | Alternative video decoding (CPU / NVDEC GPU) |
+| timm          | Pretrained ViT weights (STAM)        |
+| fvcore        | PyTorchVideo / X3D model support     |
+| onnxscript    | ONNX export support                  |
+| pyyaml        | YAML config loading/saving           |
+| qai-hub       | Qualcomm AI Hub SDK                  |

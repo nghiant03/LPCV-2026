@@ -29,7 +29,23 @@ import torch
 import torch.nn.functional as F
 from torchvision.transforms import Compose
 
-from lpcv.datasets.info import R2PLUS1D_MEAN, R2PLUS1D_STD
+IMAGENET_MEAN: list[float] = [0.485, 0.456, 0.406]
+"""ImageNet per-channel mean used for normalisation."""
+
+IMAGENET_STD: list[float] = [0.229, 0.224, 0.225]
+"""ImageNet per-channel standard deviation used for normalisation."""
+
+R2PLUS1D_MEAN: list[float] = [0.43216, 0.394666, 0.37645]
+"""R(2+1)D per-channel mean used by the LPCVC competition preprocessing."""
+
+R2PLUS1D_STD: list[float] = [0.22803, 0.22145, 0.216989]
+"""R(2+1)D per-channel standard deviation used by the LPCVC competition preprocessing."""
+
+X3D_MEAN: list[float] = [0.45, 0.45, 0.45]
+"""X3D per-channel mean (Kinetics-400 convention)."""
+
+X3D_STD: list[float] = [0.225, 0.225, 0.225]
+"""X3D per-channel standard deviation (Kinetics-400 convention)."""
 
 TransformFactory = Callable[..., Callable[[torch.Tensor], torch.Tensor]]
 """Type alias for a callable that produces a transform function."""

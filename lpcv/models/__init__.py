@@ -300,169 +300,255 @@ def model_config_from_trainer(model_name: str, config: Any) -> dict[str, Any]:
     return result
 
 
+def _copy_default_presets(
+    _cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET
+
+    return deepcopy(TRAIN_PRESET), deepcopy(VAL_PRESET)
+
+
+def _resolve_num_frames(cfg: dict[str, Any]) -> int:
+    return int(cfg.get("num_frames", 16))
+
+
+def _resolve_x3d_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    from lpcv.models.x3d import X3D_PRESET_DEFAULTS
+
+    resolved = deepcopy(cfg)
+    preset = resolved.get("preset", "x3d_m")
+    if preset not in X3D_PRESET_DEFAULTS:
+        available = ", ".join(sorted(X3D_PRESET_DEFAULTS))
+        raise ValueError(f"Unknown X3D preset {preset!r}. Available: {available}")
+
+    defaults = X3D_PRESET_DEFAULTS[preset]
+    num_frames = int(resolved.get("num_frames", 0))
+    crop_size = int(resolved.get("crop_size", 0))
+    resolved["preset"] = preset
+    resolved["num_frames"] = num_frames if num_frames > 0 else defaults["num_frames"]
+    resolved["crop_size"] = crop_size if crop_size > 0 else defaults["crop_size"]
+    return resolved
+
+
+def _build_x3d_presets(
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from lpcv.transforms import X3D_MEAN, X3D_STD, make_presets
+
+    return make_presets(mean=X3D_MEAN, std=X3D_STD, crop_size=int(cfg["crop_size"]))
+
+
+def _resolve_mvitv2_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    resolved = deepcopy(cfg)
+    resolved["num_frames"] = int(resolved.get("num_frames", 16))
+    resolved["crop_size"] = int(resolved.get("crop_size", 112))
+    return resolved
+
+
+def _build_mvit_like_presets(
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from lpcv.transforms import IMAGENET_MEAN, IMAGENET_STD, make_presets
+
+    return make_presets(mean=IMAGENET_MEAN, std=IMAGENET_STD, crop_size=int(cfg["crop_size"]))
+
+
+def _resolve_tsm_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    from lpcv.models.tsm import TSM_BACKBONES
+
+    resolved = deepcopy(cfg)
+    backbone = resolved.get("backbone", "resnet50")
+    if backbone not in TSM_BACKBONES:
+        available = ", ".join(sorted(TSM_BACKBONES))
+        raise ValueError(f"Unknown TSM backbone {backbone!r}. Available: {available}")
+    resolved["backbone"] = backbone
+    resolved["num_frames"] = int(resolved.get("num_frames", 8))
+    resolved["shift_div"] = int(resolved.get("shift_div", 8))
+    resolved["shift_last_n"] = int(resolved.get("shift_last_n", 2))
+    return resolved
+
+
+def _build_tsm_presets(
+    _cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from lpcv.transforms import IMAGENET_MEAN, IMAGENET_STD, make_presets
+
+    return make_presets(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+
+
+def _resolve_stam_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    resolved = deepcopy(cfg)
+    resolved["num_frames"] = int(resolved.get("num_frames", 16))
+    resolved["crop_size"] = int(resolved.get("crop_size", 112))
+    resolved["patch_size"] = int(resolved.get("patch_size", 16))
+    resolved["embed_dim"] = int(resolved.get("embed_dim", 768))
+    resolved["spatial_depth"] = int(resolved.get("spatial_depth", 12))
+    resolved["num_heads"] = int(resolved.get("num_heads", 12))
+    resolved["temporal_layers"] = int(resolved.get("temporal_layers", 6))
+    return resolved
+
+
+def _resolve_identity(cfg: dict[str, Any]) -> dict[str, Any]:
+    return deepcopy(cfg)
+
+
+def _extract_logits(out: Any) -> Any:
+    return out.logits
+
+
+def _load_videomae(path: str) -> nn.Module:
+    from transformers import VideoMAEForVideoClassification
+
+    return VideoMAEForVideoClassification.from_pretrained(path)
+
+
+def _build_videomae_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
+    from transformers import VideoMAEConfig, VideoMAEForVideoClassification
+
+    config = VideoMAEConfig(
+        num_labels=num_classes,
+        num_frames=int(kwargs.get("num_frames", 16)),
+    )
+    return VideoMAEForVideoClassification(config)
+
+
+def _load_r2plus1d(path: str) -> nn.Module:
+    from lpcv.models.r2plus1d import R2Plus1DForClassification
+
+    return R2Plus1DForClassification.load_pretrained(path)
+
+
+def _build_r2plus1d_throwaway(num_classes: int, **_kwargs: Any) -> nn.Module:
+    from lpcv.models.r2plus1d import R2Plus1DForClassification
+
+    return R2Plus1DForClassification(num_classes=num_classes, pretrained=False)
+
+
+def _load_x3d(path: str) -> nn.Module:
+    from lpcv.models.x3d import X3DForClassification
+
+    return X3DForClassification.load_pretrained(path)
+
+
+def _build_x3d_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
+    from lpcv.models.x3d import X3DForClassification
+
+    return X3DForClassification(
+        num_classes=num_classes,
+        preset=kwargs.get("preset", "x3d_m"),
+        pretrained=False,
+    )
+
+
+def _load_tsm(path: str) -> nn.Module:
+    from lpcv.models.tsm import TSMForClassification
+
+    return TSMForClassification.load_pretrained(path)
+
+
+def _build_tsm_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
+    from lpcv.models.tsm import TSMForClassification
+
+    return TSMForClassification(
+        num_classes=num_classes,
+        backbone_name=kwargs.get("backbone", "resnet50"),
+        num_frames=int(kwargs.get("num_frames", 8)),
+        shift_div=int(kwargs.get("shift_div", 8)),
+        shift_last_n=int(kwargs.get("shift_last_n", 2)),
+        pretrained=False,
+    )
+
+
+def _load_mvitv2(path: str) -> nn.Module:
+    from lpcv.models.mvitv2 import MViTv2ForClassification
+
+    return MViTv2ForClassification.load_pretrained(path)
+
+
+def _build_mvitv2_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
+    from lpcv.models.mvitv2 import MViTv2ForClassification
+
+    return MViTv2ForClassification(
+        num_classes=num_classes,
+        crop_size=int(kwargs.get("crop_size", 112)),
+        pretrained=False,
+    )
+
+
+def _load_stam(path: str) -> nn.Module:
+    from lpcv.models.stam import STAMForClassification
+
+    return STAMForClassification.load_pretrained(path)
+
+
+def _build_stam_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
+    from lpcv.models.stam import STAMForClassification
+
+    return STAMForClassification(
+        num_classes=num_classes,
+        num_frames=int(kwargs.get("num_frames", 16)),
+        crop_size=int(kwargs.get("crop_size", 112)),
+        patch_size=int(kwargs.get("patch_size", 16)),
+        embed_dim=int(kwargs.get("embed_dim", 768)),
+        spatial_depth=int(kwargs.get("spatial_depth", 12)),
+        num_heads=int(kwargs.get("num_heads", 12)),
+        temporal_layers=int(kwargs.get("temporal_layers", 6)),
+    )
+
+
 def _register_builtins() -> None:
     """Register built-in model types (deferred imports for fast CLI startup)."""
-    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET, make_presets
+    from lpcv.models.mvitv2 import MViTv2ModelTrainer, MViTv2TrainerConfig
+    from lpcv.models.r2plus1d import R2Plus1DModelTrainer, R2Plus1DTrainerConfig
+    from lpcv.models.stam import STAMModelTrainer, STAMTrainerConfig
+    from lpcv.models.tsm import TSMModelTrainer, TSMTrainerConfig
+    from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
+    from lpcv.models.x3d import X3DModelTrainer, X3DTrainerConfig
+    from lpcv.transforms import TRAIN_PRESET, VAL_PRESET
 
-    def _copy_default_presets(
-        _cfg: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        return deepcopy(TRAIN_PRESET), deepcopy(VAL_PRESET)
-
-    def _resolve_num_frames(cfg: dict[str, Any]) -> int:
-        return int(cfg.get("num_frames", 16))
-
-    def _resolve_x3d_config(cfg: dict[str, Any]) -> dict[str, Any]:
-        from lpcv.models.x3d import X3D_PRESET_DEFAULTS
-
-        resolved = deepcopy(cfg)
-        preset = resolved.get("preset", "x3d_m")
-        if preset not in X3D_PRESET_DEFAULTS:
-            available = ", ".join(sorted(X3D_PRESET_DEFAULTS))
-            raise ValueError(f"Unknown X3D preset {preset!r}. Available: {available}")
-
-        defaults = X3D_PRESET_DEFAULTS[preset]
-        num_frames = int(resolved.get("num_frames", 0))
-        crop_size = int(resolved.get("crop_size", 0))
-        resolved["preset"] = preset
-        resolved["num_frames"] = num_frames if num_frames > 0 else defaults["num_frames"]
-        resolved["crop_size"] = crop_size if crop_size > 0 else defaults["crop_size"]
-        return resolved
-
-    def _build_x3d_presets(
-        cfg: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        from lpcv.datasets.info import X3D_MEAN, X3D_STD
-
-        return make_presets(mean=X3D_MEAN, std=X3D_STD, crop_size=int(cfg["crop_size"]))
-
-    def _resolve_mvitv2_config(cfg: dict[str, Any]) -> dict[str, Any]:
-        resolved = deepcopy(cfg)
-        resolved["num_frames"] = int(resolved.get("num_frames", 16))
-        resolved["crop_size"] = int(resolved.get("crop_size", 112))
-        return resolved
-
-    def _build_mvit_like_presets(
-        cfg: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
-
-        return make_presets(mean=IMAGENET_MEAN, std=IMAGENET_STD, crop_size=int(cfg["crop_size"]))
-
-    def _resolve_tsm_config(cfg: dict[str, Any]) -> dict[str, Any]:
-        from lpcv.models.tsm import TSM_BACKBONES
-
-        resolved = deepcopy(cfg)
-        backbone = resolved.get("backbone", "resnet50")
-        if backbone not in TSM_BACKBONES:
-            available = ", ".join(sorted(TSM_BACKBONES))
-            raise ValueError(f"Unknown TSM backbone {backbone!r}. Available: {available}")
-        resolved["backbone"] = backbone
-        resolved["num_frames"] = int(resolved.get("num_frames", 8))
-        resolved["shift_div"] = int(resolved.get("shift_div", 8))
-        resolved["shift_last_n"] = int(resolved.get("shift_last_n", 2))
-        return resolved
-
-    def _build_tsm_presets(
-        _cfg: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        from lpcv.datasets.info import IMAGENET_MEAN, IMAGENET_STD
-
-        return make_presets(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-
-    def _resolve_stam_config(cfg: dict[str, Any]) -> dict[str, Any]:
-        resolved = deepcopy(cfg)
-        resolved["num_frames"] = int(resolved.get("num_frames", 16))
-        resolved["crop_size"] = int(resolved.get("crop_size", 112))
-        resolved["patch_size"] = int(resolved.get("patch_size", 16))
-        resolved["embed_dim"] = int(resolved.get("embed_dim", 768))
-        resolved["spatial_depth"] = int(resolved.get("spatial_depth", 12))
-        resolved["num_heads"] = int(resolved.get("num_heads", 12))
-        resolved["temporal_layers"] = int(resolved.get("temporal_layers", 6))
-        return resolved
-
-    def _load_videomae(path: str) -> nn.Module:
-        from transformers import VideoMAEForVideoClassification
-
-        return VideoMAEForVideoClassification.from_pretrained(path)
-
-    def _build_videomae_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
-        from transformers import VideoMAEConfig, VideoMAEForVideoClassification
-
-        config = VideoMAEConfig(
-            num_labels=num_classes,
-            num_frames=int(kwargs.get("num_frames", 16)),
-        )
-        return VideoMAEForVideoClassification(config)
-
-    def _make_videomae_spec() -> ModelSpec:
-        from lpcv.models.videomae import VideoMAEModelTrainer, VideoMAETrainerConfig
-
-        return ModelSpec(
+    register_model(
+        "videomae",
+        ModelSpec(
             train_preset=TRAIN_PRESET,
             val_preset=VAL_PRESET,
             config_cls=VideoMAETrainerConfig,
             trainer_cls=VideoMAEModelTrainer,
             loader=_load_videomae,
-            config_resolver=lambda cfg: deepcopy(cfg),
+            config_resolver=_resolve_identity,
             preset_builder=_copy_default_presets,
             num_frames_resolver=_resolve_num_frames,
             input_layout="BTCHW",
             input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
+            output_extractor=_extract_logits,
             throwaway_builder=_build_videomae_throwaway,
-        )
+        ),
+    )
 
-    def _load_r2plus1d(path: str) -> nn.Module:
-        from lpcv.models.r2plus1d import R2Plus1DForClassification
-
-        return R2Plus1DForClassification.load_pretrained(path)
-
-    def _build_r2plus1d_throwaway(num_classes: int, **_kwargs: Any) -> nn.Module:
-        from lpcv.models.r2plus1d import R2Plus1DForClassification
-
-        return R2Plus1DForClassification(num_classes=num_classes, pretrained=False)
-
-    def _make_r2plus1d_spec() -> ModelSpec:
-        from lpcv.models.r2plus1d import R2Plus1DModelTrainer, R2Plus1DTrainerConfig
-
-        return ModelSpec(
+    register_model(
+        "r2plus1d",
+        ModelSpec(
             train_preset=TRAIN_PRESET,
             val_preset=VAL_PRESET,
             config_cls=R2Plus1DTrainerConfig,
             trainer_cls=R2Plus1DModelTrainer,
             loader=_load_r2plus1d,
-            config_resolver=lambda cfg: deepcopy(cfg),
+            config_resolver=_resolve_identity,
             preset_builder=_copy_default_presets,
             num_frames_resolver=_resolve_num_frames,
             input_layout="BCTHW",
             input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
+            output_extractor=_extract_logits,
             throwaway_builder=_build_r2plus1d_throwaway,
-        )
+        ),
+    )
 
-    def _load_x3d(path: str) -> nn.Module:
-        from lpcv.models.x3d import X3DForClassification
-
-        return X3DForClassification.load_pretrained(path)
-
-    def _build_x3d_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
-        from lpcv.models.x3d import X3DForClassification
-
-        return X3DForClassification(
-            num_classes=num_classes,
-            preset=kwargs.get("preset", "x3d_m"),
-            pretrained=False,
-        )
-
-    def _make_x3d_spec() -> ModelSpec:
-        from lpcv.models.x3d import X3DModelTrainer, X3DTrainerConfig
-
-        default_cfg = _resolve_x3d_config(_model_specific_defaults(X3DTrainerConfig))
-        train_preset, val_preset = _build_x3d_presets(default_cfg)
-        return ModelSpec(
-            train_preset=train_preset,
-            val_preset=val_preset,
+    default_x3d_cfg = _resolve_x3d_config(_model_specific_defaults(X3DTrainerConfig))
+    x3d_train, x3d_val = _build_x3d_presets(default_x3d_cfg)
+    register_model(
+        "x3d",
+        ModelSpec(
+            train_preset=x3d_train,
+            val_preset=x3d_val,
             config_cls=X3DTrainerConfig,
             trainer_cls=X3DModelTrainer,
             loader=_load_x3d,
@@ -471,34 +557,17 @@ def _register_builtins() -> None:
             num_frames_resolver=_resolve_num_frames,
             input_layout="BCTHW",
             input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
+            output_extractor=_extract_logits,
             throwaway_builder=_build_x3d_throwaway,
-        )
+        ),
+    )
 
-    def _load_tsm(path: str) -> nn.Module:
-        from lpcv.models.tsm import TSMForClassification
-
-        return TSMForClassification.load_pretrained(path)
-
-    def _build_tsm_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
-        from lpcv.models.tsm import TSMForClassification
-
-        return TSMForClassification(
-            num_classes=num_classes,
-            backbone_name=kwargs.get("backbone", "resnet50"),
-            num_frames=int(kwargs.get("num_frames", 8)),
-            shift_div=int(kwargs.get("shift_div", 8)),
-            shift_last_n=int(kwargs.get("shift_last_n", 2)),
-            pretrained=False,
-        )
-
-    def _make_tsm_spec() -> ModelSpec:
-        from lpcv.models.tsm import TSMModelTrainer, TSMTrainerConfig
-
-        train_preset, val_preset = _build_tsm_presets({})
-        return ModelSpec(
-            train_preset=train_preset,
-            val_preset=val_preset,
+    tsm_train, tsm_val = _build_tsm_presets({})
+    register_model(
+        "tsm",
+        ModelSpec(
+            train_preset=tsm_train,
+            val_preset=tsm_val,
             config_cls=TSMTrainerConfig,
             trainer_cls=TSMModelTrainer,
             loader=_load_tsm,
@@ -507,32 +576,18 @@ def _register_builtins() -> None:
             num_frames_resolver=_resolve_num_frames,
             input_layout="BCTHW",
             input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
+            output_extractor=_extract_logits,
             throwaway_builder=_build_tsm_throwaway,
-        )
+        ),
+    )
 
-    def _load_mvitv2(path: str) -> nn.Module:
-        from lpcv.models.mvitv2 import MViTv2ForClassification
-
-        return MViTv2ForClassification.load_pretrained(path)
-
-    def _build_mvitv2_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
-        from lpcv.models.mvitv2 import MViTv2ForClassification
-
-        return MViTv2ForClassification(
-            num_classes=num_classes,
-            crop_size=int(kwargs.get("crop_size", 112)),
-            pretrained=False,
-        )
-
-    def _make_mvitv2_spec() -> ModelSpec:
-        from lpcv.models.mvitv2 import MViTv2ModelTrainer, MViTv2TrainerConfig
-
-        default_cfg = _resolve_mvitv2_config(_model_specific_defaults(MViTv2TrainerConfig))
-        train_preset, val_preset = _build_mvit_like_presets(default_cfg)
-        return ModelSpec(
-            train_preset=train_preset,
-            val_preset=val_preset,
+    default_mvitv2_cfg = _resolve_mvitv2_config(_model_specific_defaults(MViTv2TrainerConfig))
+    mvitv2_train, mvitv2_val = _build_mvit_like_presets(default_mvitv2_cfg)
+    register_model(
+        "mvitv2",
+        ModelSpec(
+            train_preset=mvitv2_train,
+            val_preset=mvitv2_val,
             config_cls=MViTv2TrainerConfig,
             trainer_cls=MViTv2ModelTrainer,
             loader=_load_mvitv2,
@@ -541,37 +596,18 @@ def _register_builtins() -> None:
             num_frames_resolver=_resolve_num_frames,
             input_layout="BCTHW",
             input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
+            output_extractor=_extract_logits,
             throwaway_builder=_build_mvitv2_throwaway,
-        )
+        ),
+    )
 
-    def _load_stam(path: str) -> nn.Module:
-        from lpcv.models.stam import STAMForClassification
-
-        return STAMForClassification.load_pretrained(path)
-
-    def _build_stam_throwaway(num_classes: int, **kwargs: Any) -> nn.Module:
-        from lpcv.models.stam import STAMForClassification
-
-        return STAMForClassification(
-            num_classes=num_classes,
-            num_frames=int(kwargs.get("num_frames", 16)),
-            crop_size=int(kwargs.get("crop_size", 112)),
-            patch_size=int(kwargs.get("patch_size", 16)),
-            embed_dim=int(kwargs.get("embed_dim", 768)),
-            spatial_depth=int(kwargs.get("spatial_depth", 12)),
-            num_heads=int(kwargs.get("num_heads", 12)),
-            temporal_layers=int(kwargs.get("temporal_layers", 6)),
-        )
-
-    def _make_stam_spec() -> ModelSpec:
-        from lpcv.models.stam import STAMModelTrainer, STAMTrainerConfig
-
-        default_cfg = _resolve_stam_config(_model_specific_defaults(STAMTrainerConfig))
-        train_preset, val_preset = _build_mvit_like_presets(default_cfg)
-        return ModelSpec(
-            train_preset=train_preset,
-            val_preset=val_preset,
+    default_stam_cfg = _resolve_stam_config(_model_specific_defaults(STAMTrainerConfig))
+    stam_train, stam_val = _build_mvit_like_presets(default_stam_cfg)
+    register_model(
+        "stam",
+        ModelSpec(
+            train_preset=stam_train,
+            val_preset=stam_val,
             config_cls=STAMTrainerConfig,
             trainer_cls=STAMModelTrainer,
             loader=_load_stam,
@@ -580,16 +616,10 @@ def _register_builtins() -> None:
             num_frames_resolver=_resolve_num_frames,
             input_layout="BCTHW",
             input_key="pixel_values",
-            output_extractor=lambda out: out.logits,
+            output_extractor=_extract_logits,
             throwaway_builder=_build_stam_throwaway,
-        )
-
-    register_model("videomae", _make_videomae_spec())
-    register_model("r2plus1d", _make_r2plus1d_spec())
-    register_model("x3d", _make_x3d_spec())
-    register_model("tsm", _make_tsm_spec())
-    register_model("mvitv2", _make_mvitv2_spec())
-    register_model("stam", _make_stam_spec())
+        ),
+    )
 
 
 _register_builtins()

@@ -34,12 +34,6 @@ from lpcv.models.base import (
     log_freeze_stats,
 )
 
-MVITV2_NUM_FRAMES: int = 16
-"""Default number of temporal frames for MViTv2-S."""
-
-MVITV2_CROP_SIZE: int = 112
-"""Default spatial crop size for MViTv2-S (competition pipeline)."""
-
 _BLOCK_SETTING_CONFIG: dict[str, list[Any]] = {
     "num_heads": [1, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 8, 8],
     "input_channels": [

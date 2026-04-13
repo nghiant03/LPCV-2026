@@ -352,7 +352,7 @@ def _load_checkpoint_export_config(
 
 
 def _infer_num_frames_from_onnx(model_path: Path) -> int | None:
-    """Read ``num_frames`` from the ONNX ``pixel_values`` input shape (BCTHW)."""
+    """Read ``num_frames`` from the ONNX ``video`` input shape (BCTHW)."""
     onnx_file: Path | None = None
     if model_path.is_dir():
         candidates = list(model_path.glob("*.onnx"))
@@ -366,7 +366,7 @@ def _infer_num_frames_from_onnx(model_path: Path) -> int | None:
 
     model_proto = onnx.load(str(onnx_file), load_external_data=False)
     for inp in model_proto.graph.input:
-        if inp.name == "pixel_values":
+        if inp.name == "video":
             dims = inp.type.tensor_type.shape.dim
             if len(dims) >= 3:
                 t_dim = dims[2].dim_value
@@ -462,10 +462,10 @@ def export_onnx(
             wrapped,
             (dummy_input,),
             str(tmp_onnx),
-            input_names=["pixel_values"],
+            input_names=["video"],
             output_names=["logits"],
             dynamic_axes={
-                "pixel_values": {0: "batch_size"},
+                "video": {0: "batch_size"},
                 "logits": {0: "batch_size"},
             },
             opset_version=opset_version,
@@ -607,7 +607,7 @@ def compile_on_hub(
 
     compile_job = qai_hub.submit_compile_job(
         model=model,
-        input_specs={"pixel_values": (input_shape, "float32")},
+        input_specs={"video": (input_shape, "float32")},
         device=device,
         options="--target_runtime qnn_context_binary",
         name=name or model_path.stem,
@@ -759,10 +759,10 @@ def validate_on_hub(
             wrapped,
             (dummy,),
             str(tmp_onnx),
-            input_names=["pixel_values"],
+            input_names=["video"],
             output_names=["logits"],
             dynamic_axes={
-                "pixel_values": {0: "batch_size"},
+                "video": {0: "batch_size"},
                 "logits": {0: "batch_size"},
             },
             opset_version=opset_version,
@@ -788,7 +788,7 @@ def validate_on_hub(
         logger.info(f"Submitting compile job on {device_name}")
         compile_job = qai_hub.submit_compile_job(
             model=str(onnx_dir),
-            input_specs={"pixel_values": (input_shape, "float32")},
+            input_specs={"video": (input_shape, "float32")},
             device=device,
             options="--target_runtime qnn_context_binary",
             name=f"{job_prefix}-compile",
@@ -816,7 +816,7 @@ def validate_on_hub(
     return profile_job.url
 
 
-def run_inference_on_hub(
+def inference_on_hub(
     compiled_model_path: str | Path,
     tensor_dir: str | Path,
     manifest_path: str | Path,
@@ -888,7 +888,7 @@ def run_inference_on_hub(
         target_model = qai_hub.upload_model(str(compiled_model_path))
 
     all_jobs = []
-    input_name = "pixel_values"
+    input_name = "video"
 
     logger.info(f"Submitting inference in chunks of {CHUNK_SIZE}")
     for i in range(0, len(tensors), CHUNK_SIZE):

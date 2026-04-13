@@ -266,9 +266,9 @@ def infer(
     ] = None,
 ) -> None:
     """Upload tensors and run on-device inference via Qualcomm AI Hub."""
-    from lpcv.submission import run_inference_on_hub
+    from lpcv.submission import inference_on_hub
 
-    run_inference_on_hub(
+    inference_on_hub(
         compiled_model_path=compiled_model,
         tensor_dir=tensor_dir,
         manifest_path=tensor_dir / "manifest.jsonl",

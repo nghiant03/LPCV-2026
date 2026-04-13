@@ -187,7 +187,7 @@ Two-stage pipeline:
 - `log_freeze_stats()`: shared parameter-count logging after freezing.
 - `decompose_depthwise_conv3d()`: replaces all depthwise `Conv3d` modules with `DecomposedDepthwiseConv3d` (spatial 2D + temporal 1D decomposition for Qualcomm AI Hub compatibility).
 - `BaseForClassification(nn.Module)`: base for custom classification wrappers — provides shared `forward()`, HuggingFace-compatible `gradient_checkpointing_enable()` / `gradient_checkpointing_disable()`, `save_pretrained()`, and `_extra_save_meta()` hook. Checkpointing is applied generically around the wrapped backbone during training.
-- `BaseModelTrainer`: shared HF Trainer wrapper — reads `train_dataset.label_names`, handles TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), export-contract saving (`export_config.json`), `ddp_find_unused_parameters=True`, and custom DataLoader multiprocessing context overrides when required by a decoder/runtime. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
+- `BaseModelTrainer`: shared HF Trainer wrapper — reads `train_dataset.label_names`, handles TF32/cuDNN setup, `train()` loop, val-transform saving, model config saving (`model_config.yaml`), export-contract saving (`export_config.json`), `ddp_find_unused_parameters=False`, and custom DataLoader multiprocessing context overrides when required by a decoder/runtime. Subclasses override `_init_model()`, `_apply_freeze_strategy()`, and optionally `_collate_fn()`, `_extra_training_args()`, `_save_model()`.
 
 ### Model Training (`lpcv/models/r2plus1d.py`)
 

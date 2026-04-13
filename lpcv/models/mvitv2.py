@@ -368,6 +368,3 @@ class MViTv2ModelTrainer(BaseModelTrainer):
             return
 
         log_freeze_stats(self.model, strategy)
-
-    def _extra_training_args(self) -> dict[str, Any]:
-        return {"ddp_find_unused_parameters": False}

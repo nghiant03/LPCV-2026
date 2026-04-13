@@ -351,7 +351,31 @@ def _load_checkpoint_export_config(
     return resolved_model_type, spec, export_config, resolved_num_frames
 
 
-def _load_compile_export_config(
+def _infer_num_frames_from_onnx(model_path: Path) -> int | None:
+    """Read ``num_frames`` from the ONNX ``pixel_values`` input shape (BCTHW)."""
+    onnx_file: Path | None = None
+    if model_path.is_dir():
+        candidates = list(model_path.glob("*.onnx"))
+        if candidates:
+            onnx_file = candidates[0]
+    elif model_path.suffix == ".onnx":
+        onnx_file = model_path
+
+    if onnx_file is None or not onnx_file.is_file():
+        return None
+
+    model_proto = onnx.load(str(onnx_file), load_external_data=False)
+    for inp in model_proto.graph.input:
+        if inp.name == "pixel_values":
+            dims = inp.type.tensor_type.shape.dim
+            if len(dims) >= 3:
+                t_dim = dims[2].dim_value
+                if t_dim > 0:
+                    return int(t_dim)
+    return None
+
+
+def _resolve_compile_num_frames(
     model_path: Path,
     *,
     num_frames: int | None = None,
@@ -361,14 +385,19 @@ def _load_compile_export_config(
     from lpcv.models import EXPORT_CONFIG_FILENAME
     from lpcv.transforms import load_export_config
 
-    export_path = (
-        model_path / EXPORT_CONFIG_FILENAME
-        if model_path.is_dir()
-        else model_path.parent / EXPORT_CONFIG_FILENAME
-    )
     saved_num_frames: int | None = None
-    if export_path.is_file():
-        saved_num_frames = int(load_export_config(export_path)["num_frames"])
+
+    saved_num_frames = _infer_num_frames_from_onnx(model_path)
+
+    if saved_num_frames is None:
+        export_path = (
+            model_path / EXPORT_CONFIG_FILENAME
+            if model_path.is_dir()
+            else model_path.parent / EXPORT_CONFIG_FILENAME
+        )
+        if export_path.is_file():
+            saved_num_frames = int(load_export_config(export_path)["num_frames"])
+
     return _resolve_export_num_frames(saved_num_frames, num_frames, force_override=force_override)
 
 
@@ -383,9 +412,6 @@ def export_onnx(
     force_override: bool = False,
 ) -> Path:
     """Wrap a trained checkpoint with the saved adapter contract and export to ONNX."""
-    from lpcv.models import EXPORT_CONFIG_FILENAME
-    from lpcv.transforms import save_export_config
-
     model_path = Path(model_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -454,8 +480,6 @@ def export_onnx(
         all_tensors_to_one_file=True,
         location=data_file,
     )
-
-    save_export_config(export_config, onnx_dir / EXPORT_CONFIG_FILENAME)
 
     logger.info(f"ONNX model directory saved to {onnx_dir}")
     return onnx_dir
@@ -567,7 +591,7 @@ def compile_on_hub(
     model_path = Path(model_path)
 
     device = qai_hub.Device(device_name)
-    resolved_num_frames = _load_compile_export_config(
+    resolved_num_frames = _resolve_compile_num_frames(
         model_path,
         num_frames=num_frames,
         force_override=force_override,
@@ -678,7 +702,11 @@ def validate_on_hub(
     logger.info(f"Building throwaway {model_type} model ({num_classes} classes)")
     base_model = spec.throwaway_builder(
         num_classes,
-        **{k: v for k, v in resolved_model.model_config.items() if k != "model"},
+        **{
+            k: v
+            for k, v in resolved_model.model_config.items()
+            if k not in ("model", "num_classes")
+        },
     )
 
     device = qai_hub.Device(device_name)
@@ -748,8 +776,6 @@ def validate_on_hub(
             all_tensors_to_one_file=True,
             location=data_file,
         )
-
-        save_export_config(export_config, onnx_dir / EXPORT_CONFIG_FILENAME)
 
         input_shape = (
             1,

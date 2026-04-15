@@ -251,8 +251,12 @@ def infer(
         str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
     ] = "Dragonwing IQ-9075 EVK",
     channel_last: Annotated[
-        bool, typer.Option("--channel-last", help="Transpose tensors to NTHWC layout.")
-    ] = False,
+        bool,
+        typer.Option(
+            "--channel-last/--no-channel-last",
+            help="Upload tensors in NTHWC layout (default, matches competition).",
+        ),
+    ] = True,
     hub_model_id: Annotated[
         str | None,
         typer.Option(

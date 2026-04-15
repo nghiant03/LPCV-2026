@@ -44,6 +44,9 @@ CHUNK_SIZE = 538
 FRAME_RATE = 4
 """Frame rate used by the competition's VideoClips-based preprocessing."""
 
+COMPETITION_INPUT_NAME = "video"
+"""ONNX input name expected by the competition evaluation pipeline."""
+
 
 def preprocess_dataset(
     data_dir: str | Path,
@@ -52,7 +55,7 @@ def preprocess_dataset(
     decoder_name: str = "pyav",
     target_fps: int = FRAME_RATE,
 ) -> Path:
-    """Decode videos to ``(1, 3, T, 112, 112)`` ``.npy`` tensors and write a manifest.
+    """Decode videos to ``(1, T, 112, 112, 3)`` ``.npy`` tensors and write a manifest.
 
     Replicates the competition's exact preprocessing pipeline so that locally
     saved tensors match what the organiser's evaluation server produces:
@@ -61,7 +64,8 @@ def preprocess_dataset(
        for short videos (matching the patched ``VideoClips`` behaviour).
     2. ``ConvertImageDtype(float32)`` → ``Resize(128, 171)``
        → ``Normalize(R2+1D mean/std)`` → ``CenterCrop(112, 112)``.
-    3. Permute to ``(C, T, H, W)`` and add batch dim → ``(1, 3, T, 112, 112)``.
+    3. Add batch dim and arrange to ``(1, T, 112, 112, 3)`` (BTHWC) to
+       match the competition's channel-last evaluation layout.
 
     Parameters
     ----------
@@ -127,7 +131,7 @@ def preprocess_dataset(
                 continue
 
             clip = spatial(clip)
-            tensor = clip.permute(1, 0, 2, 3).unsqueeze(0)
+            tensor = clip.unsqueeze(0)
 
             rel = video_path.relative_to(val_dir)
             npy_rel = rel.with_suffix(".npy")
@@ -151,9 +155,10 @@ def preprocess_dataset(
 class CompetitionAdapter(torch.nn.Module):
     """Adapter that converts competition input to a model's expected format.
 
-    The competition feeds ``(B, C, T, H, W)`` tensors at 112x112, normalized
-    with R(2+1)D mean/std. The saved export config describes the deterministic
-    delta between that tensor and the model's expected validation input.
+    The competition feeds ``(B, T, H, W, C)`` tensors at 112x112, normalized
+    with R(2+1)D mean/std. The adapter permutes to ``(B, C, T, H, W)``
+    internally, then applies any re-normalization, resize, or crop needed
+    by the wrapped model.
     """
 
     src_mean: torch.Tensor
@@ -206,20 +211,22 @@ class CompetitionAdapter(torch.nn.Module):
             torch.tensor(dst_std, dtype=torch.float32).view(1, 3, 1, 1, 1),
         )
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, video: torch.Tensor) -> torch.Tensor:
         """Adapt competition input and forward through the wrapped model.
 
         Parameters
         ----------
-        pixel_values
-            Tensor of shape ``(B, C, T, H, W)`` — R(2+1)D normalized, 112x112.
+        video
+            Tensor of shape ``(B, T, H, W, C)`` — R(2+1)D normalized, 112x112,
+            channel-last layout as delivered by the competition evaluation
+            pipeline.
 
         Returns
         -------
         torch.Tensor
             Classification logits.
         """
-        x = pixel_values
+        x = video.permute(0, 4, 1, 2, 3)
 
         if self._needs_renorm:
             x = x * self.src_std + self.src_mean
@@ -352,7 +359,7 @@ def _load_checkpoint_export_config(
 
 
 def _infer_num_frames_from_onnx(model_path: Path) -> int | None:
-    """Read ``num_frames`` from the ONNX ``video`` input shape (BCTHW)."""
+    """Read ``num_frames`` from the ONNX ``video`` input shape (BTHWC)."""
     onnx_file: Path | None = None
     if model_path.is_dir():
         candidates = list(model_path.glob("*.onnx"))
@@ -366,10 +373,10 @@ def _infer_num_frames_from_onnx(model_path: Path) -> int | None:
 
     model_proto = onnx.load(str(onnx_file), load_external_data=False)
     for inp in model_proto.graph.input:
-        if inp.name == "video":
+        if inp.name == COMPETITION_INPUT_NAME:
             dims = inp.type.tensor_type.shape.dim
-            if len(dims) >= 3:
-                t_dim = dims[2].dim_value
+            if len(dims) >= 2:
+                t_dim = dims[1].dim_value
                 if t_dim > 0:
                     return int(t_dim)
     return None
@@ -435,10 +442,10 @@ def export_onnx(
 
     dummy_input = torch.randn(
         1,
-        3,
         resolved_num_frames,
         COMPETITION_SPATIAL_SIZE,
         COMPETITION_SPATIAL_SIZE,
+        3,
     )
 
     logger.info(f"Exporting ONNX (opset {opset_version}, dynamo={dynamo}) → {output_path}")
@@ -462,10 +469,10 @@ def export_onnx(
             wrapped,
             (dummy_input,),
             str(tmp_onnx),
-            input_names=["video"],
+            input_names=[COMPETITION_INPUT_NAME],
             output_names=["logits"],
             dynamic_axes={
-                "video": {0: "batch_size"},
+                COMPETITION_INPUT_NAME: {0: "batch_size"},
                 "logits": {0: "batch_size"},
             },
             opset_version=opset_version,
@@ -596,7 +603,13 @@ def compile_on_hub(
         num_frames=num_frames,
         force_override=force_override,
     )
-    input_shape = (1, 3, resolved_num_frames, COMPETITION_SPATIAL_SIZE, COMPETITION_SPATIAL_SIZE)
+    input_shape = (
+        1,
+        resolved_num_frames,
+        COMPETITION_SPATIAL_SIZE,
+        COMPETITION_SPATIAL_SIZE,
+        3,
+    )
 
     if hub_model_id is not None:
         logger.info(f"Reusing AI Hub model: {hub_model_id}")
@@ -607,7 +620,7 @@ def compile_on_hub(
 
     compile_job = qai_hub.submit_compile_job(
         model=model,
-        input_specs={"video": (input_shape, "float32")},
+        input_specs={COMPETITION_INPUT_NAME: (input_shape, "float32")},
         device=device,
         options="--target_runtime qnn_context_binary",
         name=name or model_path.stem,
@@ -734,10 +747,10 @@ def validate_on_hub(
 
         dummy = torch.randn(
             1,
-            3,
             resolved_model.num_frames,
             COMPETITION_SPATIAL_SIZE,
             COMPETITION_SPATIAL_SIZE,
+            3,
         )
         onnx_dir = tmp_path / f"{model_type}.onnx"
         onnx_dir.mkdir()
@@ -759,10 +772,10 @@ def validate_on_hub(
             wrapped,
             (dummy,),
             str(tmp_onnx),
-            input_names=["video"],
+            input_names=[COMPETITION_INPUT_NAME],
             output_names=["logits"],
             dynamic_axes={
-                "video": {0: "batch_size"},
+                COMPETITION_INPUT_NAME: {0: "batch_size"},
                 "logits": {0: "batch_size"},
             },
             opset_version=opset_version,
@@ -779,16 +792,16 @@ def validate_on_hub(
 
         input_shape = (
             1,
-            3,
             resolved_model.num_frames,
             COMPETITION_SPATIAL_SIZE,
             COMPETITION_SPATIAL_SIZE,
+            3,
         )
 
         logger.info(f"Submitting compile job on {device_name}")
         compile_job = qai_hub.submit_compile_job(
             model=str(onnx_dir),
-            input_specs={"video": (input_shape, "float32")},
+            input_specs={COMPETITION_INPUT_NAME: (input_shape, "float32")},
             device=device,
             options="--target_runtime qnn_context_binary",
             name=f"{job_prefix}-compile",
@@ -822,7 +835,7 @@ def inference_on_hub(
     manifest_path: str | Path,
     output_h5: str | Path = "dataset-export.h5",
     device_name: str = DEFAULT_DEVICE_NAME,
-    channel_last: bool = False,
+    channel_last: bool = True,
     hub_model_id: str | None = None,
     name: str | None = None,
 ) -> Path:
@@ -841,7 +854,8 @@ def inference_on_hub(
     device_name
         AI Hub device name.
     channel_last
-        If ``True``, transpose tensors from ``NCTHW`` to ``NTHWC`` before upload.
+        If ``True`` (default), keep tensors in ``NTHWC`` layout for upload.
+        Set ``False`` only for legacy ``NCTHW`` tensors.
     hub_model_id
         If provided, reuse an already-uploaded AI Hub model instead of uploading
         *compiled_model_path* again.
@@ -888,7 +902,7 @@ def inference_on_hub(
         target_model = qai_hub.upload_model(str(compiled_model_path))
 
     all_jobs = []
-    input_name = "video"
+    input_name = COMPETITION_INPUT_NAME
 
     logger.info(f"Submitting inference in chunks of {CHUNK_SIZE}")
     for i in range(0, len(tensors), CHUNK_SIZE):

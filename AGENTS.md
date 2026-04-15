@@ -227,14 +227,14 @@ Two-stage pipeline:
 
 ### Submission Pipeline (`lpcv/submission.py`)
 
-- `preprocess_dataset()`: decodes videos to `(1,3,T,112,112)` `.npy` tensors using competition's fixed R(2+1)D normalization pipeline. Writes a `manifest.jsonl` mapping tensor paths to labels.
-- `CompetitionAdapter`: `nn.Module` that adapts competition input (BCTHW, 112×112, R2+1D norm) to any model's expected format. Handles only the supported deterministic export contract: optional re-normalization, resize, center crop, and layout permutation. It is built from `export_config.json`, not by diffing transform step lists.
-- `export_onnx()`: loads model via `ModelSpec.loader`, infers model type / `num_frames` from the saved artifact by default, wraps with `CompetitionAdapter`, exports ONNX with external data, and writes `export_config.json` into the ONNX output directory.
-- `compile_on_hub()`: uploads ONNX to Qualcomm AI Hub, infers `num_frames` from the exported ONNX metadata by default, submits compile job targeting `qnn_context_binary`, downloads `.bin`.
+- `preprocess_dataset()`: decodes videos to `(1,T,112,112,3)` `.npy` tensors (BTHWC, channel-last) using competition's fixed R(2+1)D normalization pipeline. Writes a `manifest.jsonl` mapping tensor paths to labels.
+- `CompetitionAdapter`: `nn.Module` that adapts competition input (BTHWC, 112×112, R2+1D norm) to any model's expected format. Accepts `(B,T,H,W,C)` input, permutes to `(B,C,T,H,W)`, then handles optional re-normalization, resize, center crop, and layout permutation. It is built from `export_config.json`, not by diffing transform step lists.
+- `export_onnx()`: loads model via `ModelSpec.loader`, infers model type / `num_frames` from the saved artifact by default, wraps with `CompetitionAdapter`, exports ONNX with BTHWC input shape and `"video"` input name, and writes `export_config.json` into the ONNX output directory.
+- `compile_on_hub()`: uploads ONNX to Qualcomm AI Hub, infers `num_frames` from the exported ONNX metadata by default, submits compile job with BTHWC input spec targeting `qnn_context_binary`, downloads `.bin`.
 - `profile_on_hub()`: submits a profile job for a compiled `.bin` or existing AI Hub model; returns job URL.
-- `validate_on_hub()`: end-to-end smoke test — builds throwaway model via registry → export ONNX → compile → profile on AI Hub.
-- `run_inference_on_hub()`: loads tensors from manifest, uploads in chunks of 538 (≤2GB flatbuffer limit), submits inference jobs, collects logits into HDF5.
-- Key constants: `DEFAULT_NUM_FRAMES = 16`, `DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"`, `CHUNK_SIZE = 538`, `FRAME_RATE = 4`, `COMPETITION_SPATIAL_SIZE = 112`.
+- `validate_on_hub()`: end-to-end smoke test — builds throwaway model via registry → export ONNX (BTHWC) → compile → profile on AI Hub.
+- `inference_on_hub()`: loads tensors from manifest, uploads in chunks of 538 (≤2GB flatbuffer limit) with `channel_last=True` by default (NTHWC layout matching competition), submits inference jobs, collects logits into HDF5.
+- Key constants: `DEFAULT_NUM_FRAMES = 16`, `DEFAULT_DEVICE_NAME = "Dragonwing IQ-9075 EVK"`, `CHUNK_SIZE = 538`, `FRAME_RATE = 4`, `COMPETITION_SPATIAL_SIZE = 112`, `COMPETITION_INPUT_NAME = "video"`.
 
 ### Submission CLI (`lpcv/cli/submit.py`)
 

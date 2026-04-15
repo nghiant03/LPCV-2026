@@ -7,9 +7,11 @@ spatial/temporal transforms operate on ``torch.Tensor`` with shape
 
 Built-in presets:
 
-- ``COMPETITION_PRESET`` — the competition's fixed preprocessing pipeline
-  (R2+1D normalisation, 128×171 resize, 112×112 center crop).  Single
-  source of truth for preprocess and adapter diffing.
+- ``COMPETITION_PRESET`` — the competition's fixed input pipeline
+  (128×171 resize, 112×112 center crop, no mean/std normalisation).
+  The evaluation server scales pixels to [0, 1] but does not apply
+  R(2+1)D mean/std normalisation. Single source of truth for preprocess
+  and adapter diffing.
 - ``TRAIN_PRESET`` / ``VAL_PRESET`` — default presets matching the LPCVC
   reference solution.
 
@@ -379,10 +381,13 @@ class Resize:
 COMPETITION_PRESET: list[dict[str, Any]] = [
     {"name": "ScalePixels"},
     {"name": "Resize", "height": 128, "width": 171},
-    {"name": "Normalize", "mean": R2PLUS1D_MEAN, "std": R2PLUS1D_STD},
     {"name": "CenterCrop", "height": 112},
 ]
-"""Competition's fixed preprocessing pipeline (R2+1D norm, 128×171, 112×112 crop)."""
+"""Competition's fixed input pipeline (128×171, 112×112 crop, no normalisation).
+
+Mean/std normalisation is intentionally omitted because it is baked into the
+exported ONNX graph via :class:`CompetitionAdapter`.
+"""
 
 # ---------------------------------------------------------------------------
 # Default presets (match LPCVC reference solution)
@@ -566,14 +571,12 @@ def build_export_config(
         "input_key": input_key,
         "source_spatial_size": {"height": 112, "width": 112},
         "source_normalization": {
-            "mean": [float(x) for x in R2PLUS1D_MEAN],
-            "std": [float(x) for x in R2PLUS1D_STD],
+            "mean": [0.0, 0.0, 0.0],
+            "std": [1.0, 1.0, 1.0],
         },
         "target_resize": target_resize,
         "target_crop": target_crop,
-        "target_normalization": (
-            parsed["normalize"] if parsed["normalize"] != baseline["normalize"] else None
-        ),
+        "target_normalization": parsed["normalize"],
     }
 
 

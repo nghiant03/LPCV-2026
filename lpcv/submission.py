@@ -48,6 +48,15 @@ COMPETITION_INPUT_NAME = "video"
 """ONNX input name expected by the competition evaluation pipeline."""
 
 
+def _resolve_submission_batch_size(total_chunks: int, num_batch_submission: int | None) -> int:
+    """Resolve how many inference jobs to submit before waiting for results."""
+    if num_batch_submission is None:
+        return max(total_chunks, 1)
+    if num_batch_submission < 1:
+        raise ValueError("num_batch_submission must be at least 1.")
+    return num_batch_submission
+
+
 def preprocess_dataset(
     data_dir: str | Path,
     output_dir: str | Path,
@@ -57,15 +66,18 @@ def preprocess_dataset(
 ) -> Path:
     """Decode videos to ``(1, T, 112, 112, 3)`` ``.npy`` tensors and write a manifest.
 
-    Replicates the competition's exact preprocessing pipeline so that locally
+    Replicates the competition sample solution's preprocessing so that locally
     saved tensors match what the organiser's evaluation server produces:
 
     1. Decode frames, resample to *target_fps* with dynamic adjustment
        for short videos (matching the patched ``VideoClips`` behaviour).
     2. ``ConvertImageDtype(float32)`` → ``Resize(128, 171)``
-       → ``Normalize(R2+1D mean/std)`` → ``CenterCrop(112, 112)``.
+       → ``CenterCrop(112, 112)``.
     3. Add batch dim and arrange to ``(1, T, 112, 112, 3)`` (BTHWC) to
        match the competition's channel-last evaluation layout.
+
+    Mean/std normalisation is intentionally omitted here and instead baked into
+    the exported ONNX graph by :class:`CompetitionAdapter`.
 
     Parameters
     ----------
@@ -86,7 +98,7 @@ def preprocess_dataset(
         Path to the written ``manifest.jsonl``.
     """
     from lpcv.datasets.decoder import get_decoder
-    from lpcv.datasets.info import TARGET_LABEL_FILE_NAME, VIDEO_EXTENSIONS
+    from lpcv.datasets.info import VIDEO_EXTENSIONS
     from lpcv.transforms import COMPETITION_PRESET, build_transform
 
     decoder = get_decoder(decoder_name, target_fps=target_fps)
@@ -95,20 +107,13 @@ def preprocess_dataset(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    label_file = data_dir / TARGET_LABEL_FILE_NAME
-    if not label_file.is_file():
-        raise FileNotFoundError(f"Label file not found: {label_file}")
-
-    with open(label_file) as f:
-        label_names: list[str] = json.load(f)
-
     val_dir = data_dir / "val"
     if not val_dir.is_dir():
         raise FileNotFoundError(f"Validation split not found: {val_dir}")
 
     video_entries: list[tuple[Path, str]] = []
     for class_dir in sorted(val_dir.iterdir()):
-        if not class_dir.is_dir() or class_dir.name not in label_names:
+        if not class_dir.is_dir():
             continue
         for video_file in sorted(class_dir.iterdir()):
             if video_file.is_file() and video_file.suffix.lower() in VIDEO_EXTENSIONS:
@@ -131,7 +136,7 @@ def preprocess_dataset(
                 continue
 
             clip = spatial(clip)
-            tensor = clip.unsqueeze(0)
+            tensor = clip.permute(0, 2, 3, 1).unsqueeze(0)
 
             rel = video_path.relative_to(val_dir)
             npy_rel = rel.with_suffix(".npy")
@@ -155,10 +160,10 @@ def preprocess_dataset(
 class CompetitionAdapter(torch.nn.Module):
     """Adapter that converts competition input to a model's expected format.
 
-    The competition feeds ``(B, T, H, W, C)`` tensors at 112x112, normalized
-    with R(2+1)D mean/std. The adapter permutes to ``(B, C, T, H, W)``
-    internally, then applies any re-normalization, resize, or crop needed
-    by the wrapped model.
+    The competition feeds ``(B, T, H, W, C)`` tensors at 112x112 after pixel
+    scaling, resize, and center crop, but without mean/std normalisation. The
+    adapter permutes to ``(B, C, T, H, W)`` internally, then applies the
+    model-specific normalisation, resize, or crop needed by the wrapped model.
     """
 
     src_mean: torch.Tensor
@@ -217,9 +222,9 @@ class CompetitionAdapter(torch.nn.Module):
         Parameters
         ----------
         video
-            Tensor of shape ``(B, T, H, W, C)`` — R(2+1)D normalized, 112x112,
-            channel-last layout as delivered by the competition evaluation
-            pipeline.
+            Tensor of shape ``(B, T, H, W, C)`` — channel-last competition
+            input after pixel scaling, resize, and center crop, but before
+            mean/std normalisation.
 
         Returns
         -------
@@ -838,6 +843,7 @@ def inference_on_hub(
     channel_last: bool = True,
     hub_model_id: str | None = None,
     name: str | None = None,
+    num_batch_submission: int | None = None,
 ) -> Path:
     """Upload preprocessed tensors and run on-device inference via AI Hub.
 
@@ -854,13 +860,17 @@ def inference_on_hub(
     device_name
         AI Hub device name.
     channel_last
-        If ``True`` (default), keep tensors in ``NTHWC`` layout for upload.
-        Set ``False`` only for legacy ``NCTHW`` tensors.
+        If ``True`` (default), upload tensors in ``NTHWC`` layout. Existing
+        NTHWC tensors are passed through unchanged; legacy ``NCTHW`` tensors
+        are transposed automatically.
     hub_model_id
         If provided, reuse an already-uploaded AI Hub model instead of uploading
         *compiled_model_path* again.
     name
         Optional job name prefix on AI Hub.  Auto-generated when ``None``.
+    num_batch_submission
+        Maximum number of AI Hub inference jobs to submit before waiting for
+        results. By default, submit all chunks at once.
 
     Returns
     -------
@@ -889,7 +899,10 @@ def inference_on_hub(
     for p in tqdm(npy_paths, desc="Loading tensors", unit="file"):
         x = np.load(str(p)).astype(np.float32)
         if channel_last and x.ndim == 5:
-            x = np.transpose(x, (0, 2, 3, 4, 1))
+            if x.shape[-1] != 3 and x.shape[1] == 3:
+                x = np.transpose(x, (0, 2, 3, 4, 1))
+        elif not channel_last and x.ndim == 5 and x.shape[-1] == 3:
+            x = np.transpose(x, (0, 4, 1, 2, 3))
         tensors.append(x)
 
     device = qai_hub.Device(device_name)
@@ -901,36 +914,47 @@ def inference_on_hub(
         logger.info(f"Uploading compiled model: {compiled_model_path.name}")
         target_model = qai_hub.upload_model(str(compiled_model_path))
 
-    all_jobs = []
     input_name = COMPETITION_INPUT_NAME
+    total_chunks = (len(tensors) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    submission_batch_size = _resolve_submission_batch_size(total_chunks, num_batch_submission)
 
-    logger.info(f"Submitting inference in chunks of {CHUNK_SIZE}")
-    for i in range(0, len(tensors), CHUNK_SIZE):
-        chunk = tensors[i : i + CHUNK_SIZE]
-        dataset = qai_hub.upload_dataset(
-            {input_name: chunk},
-            name=name or f"lpcv_inference_part_{i // CHUNK_SIZE + 1}",
-        )
-        job = qai_hub.submit_inference_job(
-            model=target_model,
-            device=device,
-            inputs=dataset,
-            options="",
-        )
-        logger.info(f"Chunk {i // CHUNK_SIZE + 1} job: {job.job_id}")
-        all_jobs.append(job)
-
-    logger.info("Waiting for inference jobs...")
+    logger.info(
+        f"Submitting {total_chunks} inference chunks of up to {CHUNK_SIZE} samples "
+        f"({submission_batch_size} jobs per submission batch)"
+    )
     combined_logits: list[np.ndarray] = []
-    for job in all_jobs:
-        job.wait()
-        output_data = job.download_output_data()
-        key = next(iter(output_data))
-        for arr in output_data[key]:
-            arr = np.asarray(arr)
-            if arr.ndim == 1:
-                arr = arr[np.newaxis, :]
-            combined_logits.append(arr)
+    for submission_batch_index, batch_start in enumerate(
+        range(0, total_chunks, submission_batch_size),
+        start=1,
+    ):
+        chunk_numbers = list(range(batch_start, min(batch_start + submission_batch_size, total_chunks)))
+        batch_jobs = []
+        for chunk_number in chunk_numbers:
+            tensor_offset = chunk_number * CHUNK_SIZE
+            chunk = tensors[tensor_offset : tensor_offset + CHUNK_SIZE]
+            dataset = qai_hub.upload_dataset(
+                {input_name: chunk},
+                name=name or f"lpcv_inference_part_{chunk_number + 1}",
+            )
+            job = qai_hub.submit_inference_job(
+                model=target_model,
+                device=device,
+                inputs=dataset,
+                options="",
+            )
+            logger.info(f"Chunk {chunk_number + 1} job: {job.job_id}")
+            batch_jobs.append(job)
+
+        logger.info(f"Waiting for submission batch {submission_batch_index}...")
+        for job in batch_jobs:
+            job.wait()
+            output_data = job.download_output_data()
+            key = next(iter(output_data))
+            for arr in output_data[key]:
+                arr = np.asarray(arr)
+                if arr.ndim == 1:
+                    arr = arr[np.newaxis, :]
+                combined_logits.append(arr)
 
     logger.info(f"Collected {len(combined_logits)} results, writing to {output_h5}")
 

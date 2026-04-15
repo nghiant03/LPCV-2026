@@ -15,7 +15,7 @@ app = typer.Typer(help="Submission pipeline: preprocess, export, compile, infer.
 @app.command()
 def preprocess(
     data_dir: Annotated[
-        Path, typer.Argument(help="Path to videofolder dataset root (must contain val/ split).")
+        Path, typer.Argument(help="Path to videofolder dataset root.")
     ],
     output_dir: Annotated[
         Path, typer.Argument(help="Directory to write .npy tensors and manifest.jsonl.")
@@ -62,7 +62,7 @@ def export(
     dynamo: Annotated[
         bool,
         typer.Option(
-            "--dynamo", help="Use torch.export-based ONNX exporter (flattens control flow)."
+            "--dynamo", help="Use torch.export-based ONNX exporter."
         ),
     ] = False,
     decompose: Annotated[
@@ -152,7 +152,7 @@ def compile(
 def profile(
     compiled_model: Annotated[
         Path,
-        typer.Argument(help="Path to the compiled .bin model (ignored with --hub-model-id)."),
+        typer.Argument(help="Path to the compiled .bin model."),
     ] = Path("."),
     device_name: Annotated[
         str, typer.Option("--device", "-d", help="Qualcomm AI Hub device name.")
@@ -198,7 +198,7 @@ def validate(
     dynamo: Annotated[
         bool,
         typer.Option(
-            "--dynamo", help="Use torch.export-based ONNX exporter (flattens control flow)."
+            "--dynamo", help="Use torch.export-based ONNX exporter."
         ),
     ] = False,
     decompose: Annotated[
@@ -241,7 +241,7 @@ def infer(
         typer.Option(
             "--compiled-model",
             "-c",
-            help="Path to the compiled .bin model (ignored with --hub-model-id).",
+            help="Path to the compiled .bin model.",
         ),
     ] = Path("."),
     output_h5: Annotated[
@@ -254,7 +254,7 @@ def infer(
         bool,
         typer.Option(
             "--channel-last/--no-channel-last",
-            help="Upload tensors in NTHWC layout (default, matches competition).",
+            help="Upload tensors in NTHWC layout.",
         ),
     ] = True,
     hub_model_id: Annotated[
@@ -267,6 +267,13 @@ def infer(
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Job name prefix on AI Hub."),
+    ] = None,
+    num_batch: Annotated[
+        int | None,
+        typer.Option(
+            "--num-batch",
+            help="Maximum number of inference jobs to submit before waiting.",
+        ),
     ] = None,
 ) -> None:
     """Upload tensors and run on-device inference via Qualcomm AI Hub."""
@@ -281,4 +288,5 @@ def infer(
         channel_last=channel_last,
         hub_model_id=hub_model_id,
         name=name,
+        num_batch=num_batch,
     )

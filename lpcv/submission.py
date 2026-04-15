@@ -48,15 +48,6 @@ COMPETITION_INPUT_NAME = "video"
 """ONNX input name expected by the competition evaluation pipeline."""
 
 
-def _resolve_submission_batch_size(total_chunks: int, num_batch_submission: int | None) -> int:
-    """Resolve how many inference jobs to submit before waiting for results."""
-    if num_batch_submission is None:
-        return max(total_chunks, 1)
-    if num_batch_submission < 1:
-        raise ValueError("num_batch_submission must be at least 1.")
-    return num_batch_submission
-
-
 def preprocess_dataset(
     data_dir: str | Path,
     output_dir: str | Path,
@@ -843,7 +834,7 @@ def inference_on_hub(
     channel_last: bool = True,
     hub_model_id: str | None = None,
     name: str | None = None,
-    num_batch_submission: int | None = None,
+    num_chunks: int | None = None,
 ) -> Path:
     """Upload preprocessed tensors and run on-device inference via AI Hub.
 
@@ -868,9 +859,8 @@ def inference_on_hub(
         *compiled_model_path* again.
     name
         Optional job name prefix on AI Hub.  Auto-generated when ``None``.
-    num_batch_submission
-        Maximum number of AI Hub inference jobs to submit before waiting for
-        results. By default, submit all chunks at once.
+    num_chunks
+        Number of chunks to submit in total. By default, submit all chunks.
 
     Returns
     -------
@@ -916,45 +906,45 @@ def inference_on_hub(
 
     input_name = COMPETITION_INPUT_NAME
     total_chunks = (len(tensors) + CHUNK_SIZE - 1) // CHUNK_SIZE
-    submission_batch_size = _resolve_submission_batch_size(total_chunks, num_batch_submission)
+    if num_chunks is None:
+        chunks_to_submit = total_chunks
+    elif num_chunks < 1:
+        raise ValueError("num_chunks must be at least 1.")
+    else:
+        chunks_to_submit = min(num_chunks, total_chunks)
 
     logger.info(
-        f"Submitting {total_chunks} inference chunks of up to {CHUNK_SIZE} samples "
-        f"({submission_batch_size} jobs per submission batch)"
+        f"Submitting {chunks_to_submit} of {total_chunks} inference chunks "
+        f"of up to {CHUNK_SIZE} samples"
     )
-    combined_logits: list[np.ndarray] = []
-    for submission_batch_index, batch_start in enumerate(
-        range(0, total_chunks, submission_batch_size),
-        start=1,
-    ):
-        chunk_numbers = list(range(batch_start, min(batch_start + submission_batch_size, total_chunks)))
-        batch_jobs = []
-        for chunk_number in chunk_numbers:
-            tensor_offset = chunk_number * CHUNK_SIZE
-            chunk = tensors[tensor_offset : tensor_offset + CHUNK_SIZE]
-            dataset = qai_hub.upload_dataset(
-                {input_name: chunk},
-                name=name or f"lpcv_inference_part_{chunk_number + 1}",
-            )
-            job = qai_hub.submit_inference_job(
-                model=target_model,
-                device=device,
-                inputs=dataset,
-                options="",
-            )
-            logger.info(f"Chunk {chunk_number + 1} job: {job.job_id}")
-            batch_jobs.append(job)
+    jobs: list[Any] = []
+    for chunk_number in range(chunks_to_submit):
+        tensor_offset = chunk_number * CHUNK_SIZE
+        chunk = tensors[tensor_offset : tensor_offset + CHUNK_SIZE]
+        dataset = qai_hub.upload_dataset(
+            {input_name: chunk},
+            name=name or f"lpcv_inference_part_{chunk_number + 1}",
+        )
+        job = qai_hub.submit_inference_job(
+            model=target_model,
+            device=device,
+            inputs=dataset,
+            options="",
+        )
+        logger.info(f"Chunk {chunk_number + 1} job: {job.job_id}")
+        jobs.append(job)
 
-        logger.info(f"Waiting for submission batch {submission_batch_index}...")
-        for job in batch_jobs:
-            job.wait()
-            output_data = job.download_output_data()
-            key = next(iter(output_data))
-            for arr in output_data[key]:
-                arr = np.asarray(arr)
-                if arr.ndim == 1:
-                    arr = arr[np.newaxis, :]
-                combined_logits.append(arr)
+    combined_logits: list[np.ndarray] = []
+    logger.info("Waiting for submitted inference jobs...")
+    for job in jobs:
+        job.wait()
+        output_data = job.download_output_data()
+        key = next(iter(output_data))
+        for arr in output_data[key]:
+            arr = np.asarray(arr)
+            if arr.ndim == 1:
+                arr = arr[np.newaxis, :]
+            combined_logits.append(arr)
 
     logger.info(f"Collected {len(combined_logits)} results, writing to {output_h5}")
 

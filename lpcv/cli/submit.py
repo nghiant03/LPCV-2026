@@ -14,9 +14,7 @@ app = typer.Typer(help="Submission pipeline: preprocess, export, compile, infer.
 
 @app.command()
 def preprocess(
-    data_dir: Annotated[
-        Path, typer.Argument(help="Path to videofolder dataset root.")
-    ],
+    data_dir: Annotated[Path, typer.Argument(help="Path to videofolder dataset root.")],
     output_dir: Annotated[
         Path, typer.Argument(help="Directory to write .npy tensors and manifest.jsonl.")
     ],
@@ -61,9 +59,7 @@ def export(
     opset: Annotated[int, typer.Option("--opset", help="ONNX opset version.")] = 18,
     dynamo: Annotated[
         bool,
-        typer.Option(
-            "--dynamo", help="Use torch.export-based ONNX exporter."
-        ),
+        typer.Option("--dynamo", help="Use torch.export-based ONNX exporter."),
     ] = False,
     decompose: Annotated[
         bool,
@@ -197,9 +193,7 @@ def validate(
     opset: Annotated[int, typer.Option("--opset", help="ONNX opset version.")] = 18,
     dynamo: Annotated[
         bool,
-        typer.Option(
-            "--dynamo", help="Use torch.export-based ONNX exporter."
-        ),
+        typer.Option("--dynamo", help="Use torch.export-based ONNX exporter."),
     ] = False,
     decompose: Annotated[
         bool,
@@ -268,11 +262,11 @@ def infer(
         str | None,
         typer.Option("--name", "-n", help="Job name prefix on AI Hub."),
     ] = None,
-    num_batch: Annotated[
+    num_chunks: Annotated[
         int | None,
         typer.Option(
-            "--num-batch",
-            help="Maximum number of inference jobs to submit before waiting.",
+            "--num-chunks",
+            help="Number of chunks to be submitted.",
         ),
     ] = None,
 ) -> None:
@@ -288,5 +282,5 @@ def infer(
         channel_last=channel_last,
         hub_model_id=hub_model_id,
         name=name,
-        num_batch=num_batch,
+        num_chunks=num_chunks,
     )
